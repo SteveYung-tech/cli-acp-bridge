@@ -60,8 +60,8 @@ function sse(res, payload) {
 function streamChatFrames(res) {
   sse(res, {
     type: "runtime_info",
-    runtime: "atomcode",
-    version: "0.0.0-fake",
+    provider: "fake-provider",
+    model: "fake-model",
   });
   sse(res, {
     type: "session_assigned",
@@ -73,7 +73,7 @@ function streamChatFrames(res) {
     type: "tool_start",
     id: "tool-1",
     name: "fake_tool",
-    arguments: {},
+    arguments: "{}",
   });
   sse(res, {
     type: "tool_result",
@@ -128,7 +128,7 @@ function main() {
         name: "fake-session",
         working_dir: "fixture",
         project_hash: "fake-project",
-        created_at: "2026-08-18T00:00:00.000Z",
+        created_at: 1_723_939_200,
       });
       return;
     }

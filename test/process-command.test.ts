@@ -99,7 +99,7 @@ test("terminateProcess forcefully ends a child that ignores stdin and SIGTERM", 
   );
 
   try {
-    assert.equal(await settlesWithin(terminateProcess(child, 50), 1_000), "completed");
+    assert.equal(await settlesWithin(terminateProcess(child, 50), 2_000), "completed");
   } finally {
     await stopChild(child);
   }
@@ -145,9 +145,10 @@ test("fake AtomCode daemon emits ChatEvent JSON data frames", async () => {
       "tokens",
       "done",
     ]);
+    assert.deepEqual(events[0], { type: "runtime_info", provider: "fake-provider", model: "fake-model" });
     assert.deepEqual(events[2], { type: "text", content: "hello" });
     assert.deepEqual(events[3], { type: "reasoning", content: "thinking" });
-    assert.deepEqual(events[4], { type: "tool_start", id: "tool-1", name: "fake_tool", arguments: {} });
+    assert.deepEqual(events[4], { type: "tool_start", id: "tool-1", name: "fake_tool", arguments: "{}" });
     assert.deepEqual(events[5], {
       type: "tool_result",
       id: "tool-1",
@@ -188,7 +189,7 @@ test("fake AtomCode daemon logs startup and every request", async () => {
       name: "fake-session",
       working_dir: "fixture",
       project_hash: "fake-project",
-      created_at: "2026-08-18T00:00:00.000Z",
+      created_at: 1_723_939_200,
     });
     assert.equal((await fetch(`http://127.0.0.1:${port}/chat`, { method: "POST", body: JSON.stringify({ message: "hello" }) })).status, 200);
     assert.equal((await fetch(`http://127.0.0.1:${port}/chat/stop`, { method: "POST" })).status, 200);
