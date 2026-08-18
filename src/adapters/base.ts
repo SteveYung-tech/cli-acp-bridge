@@ -1,5 +1,6 @@
 import * as acp from "@agentclientprotocol/sdk";
 import type { SessionState } from "../session/manager.js";
+import type { TimingTrace } from "../runtime/timing.js";
 
 export interface ExecuteTurnOptions {
   sessionId: string;
@@ -9,6 +10,7 @@ export interface ExecuteTurnOptions {
   model?: string;
   mode?: string;
   provider?: string;
+  trace?: TimingTrace;
   signal?: AbortSignal;
   onThought?: (thought: string) => void | Promise<void>;
   onChunk?: (chunk: string) => void | Promise<void>;

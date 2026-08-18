@@ -6,7 +6,7 @@ import { EventEmitter, once } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { spawnCommand, terminateProcess } from "../src/runtime/process-command.js";
+import { processCommandWithPrefix, spawnCommand, terminateProcess } from "../src/runtime/process-command.js";
 
 const fixturePath = join(process.cwd(), "test", "fixtures", "fake-atomcode.mjs");
 
@@ -41,6 +41,21 @@ function parseSseData(stream: string): Record<string, unknown>[] {
     .filter((payload): payload is string => payload !== undefined)
     .map((payload) => JSON.parse(payload));
 }
+
+test("process command reads only a valid JSON string-array prefix", () => {
+  assert.deepEqual(
+    processCommandWithPrefix("node", "FIXTURE_ARGS", { FIXTURE_ARGS: '["fixture.mjs","--flag"]' }),
+    { command: "node", argsPrefix: ["fixture.mjs", "--flag"] },
+  );
+  assert.deepEqual(processCommandWithPrefix("node", "FIXTURE_ARGS", {}), {
+    command: "node",
+    argsPrefix: [],
+  });
+  assert.throws(
+    () => processCommandWithPrefix("node", "FIXTURE_ARGS", { FIXTURE_ARGS: '{"bad":true}' }),
+    /JSON array of strings/,
+  );
+});
 
 async function settlesWithin(promise: Promise<void>, timeoutMs: number): Promise<"completed" | "timed out"> {
   let timer: ReturnType<typeof setTimeout> | undefined;

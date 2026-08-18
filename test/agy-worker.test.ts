@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { AgyWorker } from "../src/adapters/agy/worker.js";
 import type { ProcessCommand } from "../src/runtime/process-command.js";
+import { TimingTrace } from "../src/runtime/timing.js";
 
 const fixturePath = join(process.cwd(), "test", "fixtures", "fake-agy.mjs");
 
@@ -293,4 +294,21 @@ test("dispose is idempotent and settles an active turn", async () => {
   assert.equal((await settlesWithin(turn)).cancelled, true);
   await settlesWithin(worker.dispose());
   await assert.rejects(worker.runTurn("later", {}), /disposed/);
+});
+
+test("AGY timing observes thought and text events without display callbacks", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "agy-worker-timing-"));
+  const logPath = join(directory, "backend.log");
+  const worker = createFixtureWorker(logPath);
+  const writes: string[] = [];
+  const trace = new TimingTrace("agy", "timing", { ACP_TIMING: "1" }, (line) => writes.push(line));
+  try {
+    await worker.start();
+    await worker.runTurn("one", { trace });
+    assert.match(writes.join(""), /mark=first_thought/);
+    assert.match(writes.join(""), /mark=first_text/);
+  } finally {
+    await worker.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
 });

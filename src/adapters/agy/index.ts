@@ -3,7 +3,8 @@ import path from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentAdapter, ExecuteTurnOptions, TurnResult } from "../base.js";
 import type { SessionState } from "../../session/manager.js";
-import type { ProcessCommand } from "../../runtime/process-command.js";
+import { processCommandWithPrefix, type ProcessCommand } from "../../runtime/process-command.js";
+import { TimingTrace } from "../../runtime/timing.js";
 import { AgyWorker } from "./worker.js";
 
 const DEFAULT_AGY_MODEL = "Gemini 3.7 Flash (High)";
@@ -75,6 +76,7 @@ export class AgyAdapter implements AgentAdapter {
     const runtime = this.runtimes.get(sessionId);
     if (!runtime) return;
     await runtime.preparation;
+    if (!runtime.worker.hasActiveTurn) return;
     await runtime.worker.cancel();
     runtime.conversationId = runtime.worker.conversationId ?? runtime.conversationId;
     if (!this.disposed && this.runtimes.get(sessionId) === runtime) {
@@ -245,6 +247,8 @@ export class AgyAdapter implements AgentAdapter {
     if (!runtime) throw new Error(`Unknown or closed AGY ACP session: ${options.sessionId}`);
 
     await runtime.preparation;
+    const trace = options.trace ?? new TimingTrace("agy", options.sessionId, this.options.env ?? process.env);
+    if (!options.trace) trace.mark("prompt_received");
     const result = await runtime.worker.runTurn(options.prompt, {
       onThought: options.onThought,
       onChunk: options.onChunk,
@@ -252,6 +256,7 @@ export class AgyAdapter implements AgentAdapter {
       onToolEnd: options.onToolEnd,
       onMetrics: options.onMetrics,
       onStderr: options.onStderr,
+      trace,
     }, options.signal);
     runtime.conversationId = runtime.worker.conversationId ?? runtime.conversationId;
     return result;
@@ -270,7 +275,11 @@ export class AgyAdapter implements AgentAdapter {
     conversationId?: string,
   ): AgySessionRuntime {
     const worker = new AgyWorker({
-      command: this.options.command ?? { command: this.resolveBinaryPath(), argsPrefix: [] },
+      command: this.options.command ?? processCommandWithPrefix(
+        this.resolveBinaryPath(),
+        "AGY_ARGS_PREFIX_JSON",
+        this.options.env ?? process.env,
+      ),
       cwd,
       model,
       mode,

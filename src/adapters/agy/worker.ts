@@ -17,7 +17,7 @@ export interface AgyWorkerOptions {
 
 export type AgyTurnCallbacks = Pick<
   ExecuteTurnOptions,
-  "onThought" | "onChunk" | "onToolStart" | "onToolEnd" | "onMetrics" | "onStderr"
+  "onThought" | "onChunk" | "onToolStart" | "onToolEnd" | "onMetrics" | "onStderr" | "trace"
 >;
 
 interface ActiveTurn {
@@ -40,6 +40,9 @@ interface ActiveTurn {
   cancelRequested: boolean;
   nextToolId: number;
   toolIds: Map<string, string>;
+  sawEvent: boolean;
+  sawThought: boolean;
+  sawText: boolean;
 }
 
 function errorMessage(value: unknown, fallback: string): string {
@@ -86,6 +89,10 @@ export class AgyWorker {
 
   public get used(): boolean {
     return this._used;
+  }
+
+  public get hasActiveTurn(): boolean {
+    return this.active !== undefined;
   }
 
   public start(): Promise<void> {
@@ -162,6 +169,9 @@ export class AgyWorker {
         cancelRequested: false,
         nextToolId: 0,
         toolIds: new Map(),
+        sawEvent: false,
+        sawThought: false,
+        sawText: false,
       };
     });
 
@@ -190,6 +200,7 @@ export class AgyWorker {
       });
       this._used = true;
       this.trace.mark("prompt_written");
+      callbacks.trace?.mark("backend_accepted");
     } catch (error) {
       this.fail(new Error(`Failed to write AGY prompt: ${errorMessage(error instanceof Error ? error.message : error, "unknown error")}`));
     }
@@ -325,19 +336,33 @@ export class AgyWorker {
     const turn = this.active;
     if (!turn || turn.settled || turn.cancelRequested) return;
     turn.stdout += `${line}\n`;
+    if (!turn.sawEvent) {
+      turn.sawEvent = true;
+      turn.callbacks.trace?.mark("first_event");
+    }
 
     if (data.event === "step_update" && data.step_update) {
       const update = data.step_update;
       this.updateMetrics(turn, update.usage);
-      if (update.step_type === "agent_response" && update.text_delta && turn.callbacks.onChunk) {
+      if (update.step_type === "agent_response" && update.text_delta) {
         const text = sanitizeText(update.text_delta);
         if (text) {
+          if (!turn.sawText) {
+            turn.sawText = true;
+            turn.callbacks.trace?.mark("first_text");
+          }
           turn.streamedText = true;
-          await turn.callbacks.onChunk(text);
+          await turn.callbacks.onChunk?.(text);
         }
-      } else if (update.step_type === "thought" && update.text_delta && turn.callbacks.onThought) {
+      } else if (update.step_type === "thought" && update.text_delta) {
         const text = sanitizeText(update.text_delta);
-        if (text) await turn.callbacks.onThought(text);
+        if (text) {
+          if (!turn.sawThought) {
+            turn.sawThought = true;
+            turn.callbacks.trace?.mark("first_thought");
+          }
+          await turn.callbacks.onThought?.(text);
+        }
       } else if (update.step_type === "tool" && update.tool_info) {
         const key = String(update.step_index ?? update.tool_info.tool_name ?? "tool");
         if (update.state === "ACTIVE") {
@@ -379,11 +404,15 @@ export class AgyWorker {
       return;
     }
 
-    if (!turn.streamedText && data.result.response && turn.callbacks.onChunk) {
+    if (!turn.streamedText && data.result.response) {
       const text = sanitizeText(data.result.response);
       if (text) {
+        if (!turn.sawText) {
+          turn.sawText = true;
+          turn.callbacks.trace?.mark("first_text");
+        }
         turn.streamedText = true;
-        await turn.callbacks.onChunk(text);
+        await turn.callbacks.onChunk?.(text);
       }
     }
     if (turn.settled || turn.cancelRequested) return;
@@ -461,6 +490,7 @@ export class AgyWorker {
   }
 
   private cleanupTurn(turn: ActiveTurn): void {
+    turn.callbacks.trace?.mark("turn_completed");
     if (turn.signal && turn.abortListener) turn.signal.removeEventListener("abort", turn.abortListener);
     if (this.active === turn) this.active = undefined;
   }

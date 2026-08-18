@@ -83,6 +83,7 @@ export class AtomCodeDaemon {
     request: AtomCodeChatRequest,
     onEvent: (event: AtomCodeChatEvent) => void | Promise<void>,
     signal?: AbortSignal,
+    onAccepted?: () => void | Promise<void>,
   ): Promise<void> {
     await this.ensureReady();
     const response = await fetch(`${this.baseUrl}/chat`, {
@@ -93,6 +94,7 @@ export class AtomCodeDaemon {
     });
     if (!response.ok) throw await this.responseError("AtomCode chat", response);
     if (!response.body) throw new Error("AtomCode chat response has no body");
+    await onAccepted?.();
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();

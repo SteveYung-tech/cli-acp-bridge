@@ -35,7 +35,7 @@
 
 ## 🌟 核心功能特性
 
-1. **逐字零延迟流式输出（Zero-Latency Streaming）**：重构为字符级状态机，消除行缓冲等待，首字响应毫秒级推送。
+1. **持久后端与增量流式输出**：AtomCode 在每个 ACP 进程内复用一个私有 daemon；AGY 在每个 ACP 会话内复用一个 `stream-json` worker。提示词不再为每轮重复启动 CLI，文本事件到达后立即转发，不做适配器批处理。
 2. **原生折叠思考流（Thinking Bubble）**：深度提取思维链并实时封装为 `agent_thought_chunk`。
 3. **打断插话与排队发送（Prompt Queue & Interruption）**：在生成过程中发送新指令并点击 Stop 时，优雅打断并自动无缝发送排队消息，与 Codex 原生体验一致。
 4. **模型与模式热切换**：
@@ -44,6 +44,17 @@
    * **AtomCode**：`/plan`（任务规划）、`/review`（代码审查）、`/test`（生成测试）、`/init`（项目初始化）、`/compact`（历史压缩）、`/help`（帮助说明）。
    * **Antigravity (agy)**：`/plan`（分步规划）、`/grill-me`（深度需求对齐）、`/learn`（沉淀知识/规则）、`/research`（启动调研子代理）、`/review`（Diff 审查）、`/compact`（上下文压缩）、`/help`（指南）。
 6. **内置代理路由**：默认自动注入本地代理节点 `http://127.0.0.1:7897`，解决 Google 认证与模型网络握手问题。
+
+### 首字延迟诊断
+
+设置 `ACP_TIMING=1` 后，桥接器会把 `prompt_received`、后端就绪/接收、`first_event`、`first_thought`、`first_text` 和 `turn_completed` 的耗时记录写入 stderr。ACP 的 JSON-RPC stdout 不会混入诊断内容。
+
+```powershell
+$env:ACP_TIMING="1"
+atomcode-acp
+```
+
+`npm test` 只使用仓库内的确定性假后端，不访问模型服务，也不消耗额度。`npm run test:live:atomcode` 和 `npm run test:live:agy` 才会使用本机已配置的真实后端与供应商访问权限。
 
 ---
 
@@ -106,11 +117,12 @@ print('✅ CachyOS CodeG Agent 注册完成！')
 
 ### 4. 运行端到端验证
 ```bash
-# 验证 AtomCode
+# 非计费自动化测试（同时覆盖 AtomCode 与 AGY）
 npm test
 
-# 验证 Antigravity (agy)
-HTTP_PROXY=http://127.0.0.1:7897 HTTPS_PROXY=http://127.0.0.1:7897 npm run test:agy
+# 可选：真实后端验证，会消耗已配置的供应商访问权限
+npm run test:live:atomcode
+HTTP_PROXY=http://127.0.0.1:7897 HTTPS_PROXY=http://127.0.0.1:7897 npm run test:live:agy
 ```
 
 ---
@@ -134,11 +146,12 @@ python -c "import sqlite3; conn = sqlite3.connect(r'C:\Users\Admin\AppData\Roami
 
 ### 3. 运行端到端验证
 ```powershell
-# 验证 AtomCode
+# 非计费自动化测试（同时覆盖 AtomCode 与 AGY）
 npm test
 
-# 验证 Antigravity (agy)
-$env:HTTP_PROXY="http://127.0.0.1:7897"; $env:HTTPS_PROXY="http://127.0.0.1:7897"; npm run test:agy
+# 可选：真实后端验证，会消耗已配置的供应商访问权限
+npm run test:live:atomcode
+$env:HTTP_PROXY="http://127.0.0.1:7897"; $env:HTTPS_PROXY="http://127.0.0.1:7897"; npm run test:live:agy
 ```
 
 ---

@@ -9,6 +9,26 @@ export interface ProcessCommand {
   argsPrefix: string[];
 }
 
+export function processCommandWithPrefix(
+  command: string,
+  environmentVariable: string,
+  env: NodeJS.ProcessEnv = process.env,
+): ProcessCommand {
+  const encoded = env[environmentVariable];
+  if (encoded === undefined) return { command, argsPrefix: [] };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(encoded);
+  } catch (error) {
+    throw new Error(`${environmentVariable} must be a JSON array of strings`, { cause: error });
+  }
+  if (!Array.isArray(parsed) || !parsed.every((value) => typeof value === "string")) {
+    throw new Error(`${environmentVariable} must be a JSON array of strings`);
+  }
+  return { command, argsPrefix: parsed };
+}
+
 export function spawnCommand(
   spec: ProcessCommand,
   args: string[],

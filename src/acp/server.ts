@@ -4,6 +4,7 @@ import { SessionManager } from "../session/manager.js";
 import { expandSlashCommand } from "../commands/prompt-templates.js";
 import { handleLocalSlashCommand } from "../commands/local-handlers.js";
 import { sanitizeText } from "../stream/parser.js";
+import { TimingTrace } from "../runtime/timing.js";
 
 /**
  * Extracts plain text from an ACP prompt parameter.
@@ -182,6 +183,8 @@ export function createAgentServer(adapter: AgentAdapter) {
     session.activeAbortController = abortController;
 
     const continueSession = session.turnCount > 0;
+    const trace = new TimingTrace(adapter.id, session.id);
+    trace.mark("prompt_received");
 
     const turnPromise = (async () => {
       try {
@@ -194,6 +197,7 @@ export function createAgentServer(adapter: AgentAdapter) {
           model: session.model,
           mode: session.mode,
           provider: session.provider,
+          trace,
           signal: abortController.signal,
           onMetrics: async (delta) => {
             sessionManager.addMetrics(session.id, delta);

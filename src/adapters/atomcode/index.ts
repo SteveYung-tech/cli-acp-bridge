@@ -4,7 +4,8 @@ import path from "node:path";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentAdapter, ExecuteTurnOptions, TurnResult } from "../base.js";
 import type { SessionState } from "../../session/manager.js";
-import type { ProcessCommand } from "../../runtime/process-command.js";
+import { processCommandWithPrefix, type ProcessCommand } from "../../runtime/process-command.js";
+import { TimingTrace } from "../../runtime/timing.js";
 import {
   AtomCodeDaemon,
   type AtomCodeChatEvent,
@@ -30,6 +31,7 @@ interface AtomCodeSessionRuntime {
   cancelRequested: boolean;
   turnPending: boolean;
   closed: boolean;
+  cancelPromise?: Promise<void>;
 }
 
 export class AtomCodeAdapter implements AgentAdapter {
@@ -45,7 +47,11 @@ export class AtomCodeAdapter implements AgentAdapter {
 
   public constructor(private readonly options: AtomCodeAdapterOptions = {}) {
     const daemonOptions: AtomCodeDaemonOptions = {
-      command: options.command ?? { command: this.resolveBinaryPath(), argsPrefix: [] },
+      command: options.command ?? processCommandWithPrefix(
+        this.resolveBinaryPath(),
+        "ATOMCODE_ARGS_PREFIX_JSON",
+        options.env ?? process.env,
+      ),
       env: this.createEnvironment(),
       startupTimeoutMs: options.startupTimeoutMs,
     };
@@ -95,7 +101,8 @@ export class AtomCodeAdapter implements AgentAdapter {
     const runtime = this.runtimes.get(sessionId);
     if (!runtime?.activeRequestId) return;
     runtime.cancelRequested = true;
-    await this.daemon.stop(runtime.cancelTarget ?? runtime.activeRequestId);
+    runtime.cancelPromise ??= this.daemon.stop(runtime.cancelTarget ?? runtime.activeRequestId);
+    await runtime.cancelPromise;
   }
 
   public async closeSession(sessionId: string): Promise<void> {
@@ -230,6 +237,8 @@ export class AtomCodeAdapter implements AgentAdapter {
   }
 
   public async executeTurn(options: ExecuteTurnOptions): Promise<TurnResult> {
+    const trace = options.trace ?? new TimingTrace("atomcode", options.sessionId, this.options.env ?? process.env);
+    if (!options.trace) trace.mark("prompt_received");
     if (this.disposed) throw new Error("AtomCode adapter is disposed");
     const runtime = this.runtimes.get(options.sessionId);
     if (!runtime) throw new Error(`Unknown or closed AtomCode ACP session: ${options.sessionId}`);
@@ -238,6 +247,7 @@ export class AtomCodeAdapter implements AgentAdapter {
       throw new Error("An AtomCode turn is already active for this ACP session");
     }
     if (options.signal?.aborted) {
+      trace.mark("turn_completed");
       return { exitCode: null, stdout: "", stderr: "", cancelled: true };
     }
 
@@ -258,9 +268,13 @@ export class AtomCodeAdapter implements AgentAdapter {
     runtime.activeRequestId = requestId;
     runtime.cancelTarget = requestId;
     runtime.cancelRequested = false;
+    runtime.cancelPromise = undefined;
     let terminal: "done" | "stopped" | undefined;
     let textOutput = "";
     let toolCalls = 0;
+    let sawEvent = false;
+    let sawThought = false;
+    let sawText = false;
     const abortListener = () => void this.cancelTurn(options.sessionId).catch(() => undefined);
     options.signal?.addEventListener("abort", abortListener, { once: true });
 
@@ -272,6 +286,10 @@ export class AtomCodeAdapter implements AgentAdapter {
         request_id: requestId,
         provider: options.model ?? options.provider ?? DEFAULT_ATOMCODE_MODEL,
       }, async (event) => {
+        if (!sawEvent) {
+          sawEvent = true;
+          trace.mark("first_event");
+        }
         if (event.type === "session_assigned" && typeof event.session_id === "string") {
           runtime.nativeSessionId = event.session_id;
           runtime.cancelTarget = event.session_id;
@@ -295,8 +313,15 @@ export class AtomCodeAdapter implements AgentAdapter {
           return;
         }
         if (runtime.cancelRequested) return;
+        if (event.type === "reasoning" && typeof event.content === "string" && !sawThought) {
+          sawThought = true;
+          trace.mark("first_thought");
+        } else if (event.type === "text" && typeof event.content === "string" && !sawText) {
+          sawText = true;
+          trace.mark("first_text");
+        }
         await this.forwardEvent(event, options, () => { toolCalls++; }, (text) => { textOutput += text; });
-      }, options.signal);
+      }, options.signal, () => trace.mark("backend_accepted"));
 
       if (runtime.cancelRequested || terminal === "stopped") {
         return { exitCode: null, stdout: textOutput, stderr: "", cancelled: true };
@@ -309,11 +334,13 @@ export class AtomCodeAdapter implements AgentAdapter {
       }
       throw error;
     } finally {
+      trace.mark("turn_completed");
       options.signal?.removeEventListener("abort", abortListener);
       if (runtime.activeRequestId === requestId) {
         runtime.activeRequestId = undefined;
         runtime.cancelTarget = undefined;
         runtime.cancelRequested = false;
+        runtime.cancelPromise = undefined;
       }
     }
   }

@@ -13,6 +13,7 @@
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
+    "pretest": "npm run build",
     "test": "tsx --test test/*.test.ts",
     "test:live:atomcode": "tsx test/test-client.ts",
     "test:live:agy": "tsx test/test-agy.ts",
