@@ -1,0 +1,47 @@
+{
+  "id": "antigravity",
+  "name": "Antigravity",
+  "version": "1.0.0",
+  "description": "Antigravity (agy) AI Coding Agent via ACP with full tool execution, thinking, and multi-model support",
+  "command": "agy-acp",
+  "transport": "stdio",
+  "capabilities": {
+    "streaming": true,
+    "thinking": true,
+    "toolCalls": true,
+    "multiTurn": true,
+    "modes": ["accept-edits", "plan"],
+    "models": [
+      {
+        "id": "Gemini 3.7 Flash (High)",
+        "name": "Gemini 3.7 Flash (High)",
+        "default": true
+      },
+      {
+        "id": "Gemini 3.7 Flash (Medium)",
+        "name": "Gemini 3.7 Flash (Medium)"
+      },
+      {
+        "id": "Gemini 3.1 Pro (High)",
+        "name": "Gemini 3.1 Pro (High)"
+      },
+      {
+        "id": "Claude Sonnet 4.6 (Thinking)",
+        "name": "Claude Sonnet 4.6 (Thinking)"
+      },
+      {
+        "id": "Claude Opus 4.6 (Thinking)",
+        "name": "Claude Opus 4.6 (Thinking)"
+      },
+      {
+        "id": "GPT-OSS 120B (Medium)",
+        "name": "GPT-OSS 120B (Medium)"
+      }
+    ]
+  },
+  "env": {
+    "AGY_PATH": "C:\\Users\\Admin\\AppData\\Local\\agy\\bin\\agy.exe",
+    "HTTP_PROXY": "http://127.0.0.1:7897",
+    "HTTPS_PROXY": "http://127.0.0.1:7897"
+  }
+}

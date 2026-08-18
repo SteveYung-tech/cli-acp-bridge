@@ -1,0 +1,46 @@
+{
+  "id": "atomcode",
+  "name": "AtomCode",
+  "version": "1.0.0",
+  "description": "AtomCode AI Coding Assistant via ACP with full multi-turn, tool execution, and thinking support",
+  "author": "AtomCode Team",
+  "command": "node",
+  "args": ["E:/atomcode-acp/dist/index.js"],
+  "transport": "stdio",
+  "capabilities": {
+    "streaming": true,
+    "thinking": true,
+    "toolCalls": true,
+    "multiTurn": true,
+    "modes": ["code", "architect", "ask"],
+    "models": [
+      {
+        "id": "deepseek-v4-flash",
+        "name": "DeepSeek V4 Flash (Fast)",
+        "default": true
+      },
+      {
+        "id": "deepseek-v4",
+        "name": "DeepSeek V4"
+      },
+      {
+        "id": "codingplan-deepseek",
+        "name": "CodingPlan DeepSeek"
+      },
+      {
+        "id": "qwen-2.5-coder-32b",
+        "name": "Qwen 2.5 Coder 32B"
+      }
+    ],
+    "slashCommands": [
+      { "name": "/status", "description": "Check current AtomCode login and quota status" },
+      { "name": "/model", "description": "Switch active model" },
+      { "name": "/mcp", "description": "Manage MCP servers" },
+      { "name": "/skills", "description": "Manage skill plugins" },
+      { "name": "/clear", "description": "Reset session context" }
+    ]
+  },
+  "env": {
+    "ATOMCODE_PATH": "C:\\Users\\Admin\\AppData\\Local\\AtomCode\\atomcode.exe"
+  }
+}
