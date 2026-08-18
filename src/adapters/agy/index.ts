@@ -1,11 +1,28 @@
-import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentAdapter, ExecuteTurnOptions, TurnResult } from "../base.js";
 import type { SessionState } from "../../session/manager.js";
-import { sanitizeText } from "../../stream/parser.js";
+import type { ProcessCommand } from "../../runtime/process-command.js";
+import { AgyWorker } from "./worker.js";
+
+const DEFAULT_AGY_MODEL = "Gemini 3.7 Flash (High)";
+const DEFAULT_AGY_MODE = "accept-edits";
+
+export interface AgyAdapterOptions {
+  command?: ProcessCommand;
+  env?: NodeJS.ProcessEnv;
+  startupTimeoutMs?: number;
+}
+
+interface AgySessionRuntime {
+  worker: AgyWorker;
+  preparation: Promise<void>;
+  cwd: string;
+  model: string;
+  mode: string;
+  conversationId?: string;
+}
 
 export class AgyAdapter implements AgentAdapter {
   public readonly id = "agy";
@@ -13,17 +30,79 @@ export class AgyAdapter implements AgentAdapter {
   public readonly defaultBinaryName = "agy";
   public readonly binaryEnvVar = "AGY_PATH";
 
-  public async start(): Promise<void> {}
+  private readonly runtimes = new Map<string, AgySessionRuntime>();
+  private disposed = false;
 
-  public createSession(_session: SessionState): void {}
+  public constructor(private readonly options: AgyAdapterOptions = {}) {}
 
-  public async updateSession(_session: SessionState): Promise<void> {}
+  public async start(): Promise<void> {
+    if (this.disposed) throw new Error("AGY adapter is disposed");
+  }
 
-  public async cancelTurn(_sessionId: string): Promise<void> {}
+  public createSession(session: SessionState): void {
+    if (this.disposed) throw new Error("AGY adapter is disposed");
+    if (this.runtimes.has(session.id)) return;
+    this.runtimes.set(session.id, this.createRuntime(session));
+  }
 
-  public async closeSession(_sessionId: string): Promise<void> {}
+  public async updateSession(session: SessionState): Promise<void> {
+    if (this.disposed) throw new Error("AGY adapter is disposed");
+    const current = this.runtimes.get(session.id);
+    if (!current) {
+      const created = this.createRuntime(session);
+      this.runtimes.set(session.id, created);
+      await created.preparation;
+      return;
+    }
 
-  public async dispose(): Promise<void> {}
+    const model = session.model ?? DEFAULT_AGY_MODEL;
+    const mode = session.mode ?? DEFAULT_AGY_MODE;
+    if (current.model === model && current.mode === mode) {
+      await current.preparation;
+      return;
+    }
+
+    const conversationId = current.worker.used
+      ? current.worker.conversationId ?? current.conversationId
+      : current.conversationId;
+    await current.worker.dispose();
+    const replacement = this.createRuntime(session, conversationId);
+    this.runtimes.set(session.id, replacement);
+    await replacement.preparation;
+  }
+
+  public async cancelTurn(sessionId: string): Promise<void> {
+    const runtime = this.runtimes.get(sessionId);
+    if (!runtime) return;
+    await runtime.preparation;
+    await runtime.worker.cancel();
+    runtime.conversationId = runtime.worker.conversationId ?? runtime.conversationId;
+    if (!this.disposed && this.runtimes.get(sessionId) === runtime) {
+      const replacement = this.createRuntimeFromConfig(
+        runtime.cwd,
+        runtime.model,
+        runtime.mode,
+        runtime.conversationId,
+      );
+      this.runtimes.set(sessionId, replacement);
+      await replacement.preparation;
+    }
+  }
+
+  public async closeSession(sessionId: string): Promise<void> {
+    const runtime = this.runtimes.get(sessionId);
+    if (!runtime) return;
+    this.runtimes.delete(sessionId);
+    await runtime.worker.dispose();
+  }
+
+  public async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    const runtimes = [...this.runtimes.values()];
+    this.runtimes.clear();
+    await Promise.all(runtimes.map((runtime) => runtime.worker.dispose()));
+  }
 
   public resolveBinaryPath(): string {
     if (process.env[this.binaryEnvVar] && fs.existsSync(process.env[this.binaryEnvVar]!)) {
@@ -161,248 +240,81 @@ export class AgyAdapter implements AgentAdapter {
   }
 
   public async executeTurn(options: ExecuteTurnOptions): Promise<TurnResult> {
-    const binaryPath = this.resolveBinaryPath();
-    const args: string[] = [];
+    if (this.disposed) throw new Error("AGY adapter is disposed");
+    const runtime = this.runtimes.get(options.sessionId);
+    if (!runtime) throw new Error(`Unknown or closed AGY ACP session: ${options.sessionId}`);
 
-    // Working directory
-    if (options.cwd) {
-      args.push("--add-dir", options.cwd);
-    }
+    await runtime.preparation;
+    const result = await runtime.worker.runTurn(options.prompt, {
+      onThought: options.onThought,
+      onChunk: options.onChunk,
+      onToolStart: options.onToolStart,
+      onToolEnd: options.onToolEnd,
+      onMetrics: options.onMetrics,
+      onStderr: options.onStderr,
+    }, options.signal);
+    runtime.conversationId = runtime.worker.conversationId ?? runtime.conversationId;
+    return result;
+  }
 
-    // Continue session
-    if (options.continueSession) {
-      args.push("-c");
-    }
+  private createRuntime(session: SessionState, conversationId?: string): AgySessionRuntime {
+    const model = session.model ?? DEFAULT_AGY_MODEL;
+    const mode = session.mode ?? DEFAULT_AGY_MODE;
+    return this.createRuntimeFromConfig(session.cwd, model, mode, conversationId);
+  }
 
-    // Model and Mode
-    if (options.model) {
-      args.push("--model", options.model);
-    }
-    if (options.mode) {
-      args.push("--mode", options.mode);
-    }
-
-    // Single turn print with stream-json format
-    args.push("-p", options.prompt);
-    args.push("--output-format", "stream-json");
-    args.push("--dangerously-skip-permissions");
-
-    // Default Proxy fallback
-    const proxyUrl =
-      process.env.HTTPS_PROXY ||
-      process.env.HTTP_PROXY ||
-      process.env.https_proxy ||
-      process.env.http_proxy ||
-      process.env.ALL_PROXY ||
-      "http://127.0.0.1:7897";
-
-    return new Promise((resolve, reject) => {
-      let stdoutData = "";
-      let stderrData = "";
-      let isCancelled = false;
-      let lineBuffer = "";
-      let streamedAnyText = false;
-      let agyErrorMessage: string | null = null;
-      let turnToolCalls = 0;
-      let turnMetrics = {
-        inputTokens: 0,
-        outputTokens: 0,
-        thinkingTokens: 0,
-        cachedTokens: 0,
-      };
-
-      const child: ChildProcess = spawn(binaryPath, args, {
-        cwd: options.cwd || process.cwd(),
-        env: {
-          ...process.env,
-          HTTP_PROXY: proxyUrl,
-          HTTPS_PROXY: proxyUrl,
-          ALL_PROXY: proxyUrl,
-          http_proxy: proxyUrl,
-          https_proxy: proxyUrl,
-          all_proxy: proxyUrl,
-          CI: "true",
-          PYTHONIOENCODING: "utf-8",
-          PYTHONUTF8: "1",
-          LANG: "zh_CN.UTF-8",
-          LC_ALL: "zh_CN.UTF-8",
-          NO_COLOR: "1",
-          FORCE_COLOR: "0",
-          TERM: "dumb",
-        },
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-      });
-
-      const cleanup = () => {
-        if (options.signal) {
-          options.signal.removeEventListener("abort", onAbort);
-        }
-      };
-
-      const onAbort = () => {
-        isCancelled = true;
-        try {
-          if (child.pid) {
-            if (process.platform === "win32") {
-              spawn("taskkill", ["/pid", child.pid.toString(), "/f", "/t"]);
-            } else {
-              child.kill("SIGTERM");
-            }
-          }
-        } catch (err) {
-          console.error("Error killing agy process:", err);
-        }
-      };
-
-      if (options.signal) {
-        if (options.signal.aborted) {
-          onAbort();
-          cleanup();
-          return resolve({
-            exitCode: null,
-            stdout: "",
-            stderr: "",
-            cancelled: true,
-          });
-        }
-        options.signal.addEventListener("abort", onAbort, { once: true });
-      }
-
-      const processJsonLine = async (line: string) => {
-        const trimmed = line.trim();
-        if (!trimmed) return;
-
-        try {
-          const data = JSON.parse(trimmed);
-
-          // 1. Step updates
-          if (data.event === "step_update" && data.step_update) {
-            const update = data.step_update;
-
-            if (update.usage) {
-              turnMetrics.inputTokens = update.usage.input_tokens || turnMetrics.inputTokens;
-              turnMetrics.outputTokens = update.usage.output_tokens || turnMetrics.outputTokens;
-              turnMetrics.thinkingTokens = update.usage.thinking_tokens || turnMetrics.thinkingTokens;
-              turnMetrics.cachedTokens = update.usage.cache_read_tokens || turnMetrics.cachedTokens;
-            }
-
-            if (update.step_type === "agent_response" && update.text_delta && options.onChunk) {
-              const cleaned = sanitizeText(update.text_delta);
-              if (cleaned) {
-                streamedAnyText = true;
-                await options.onChunk(cleaned);
-              }
-            } else if (update.step_type === "thought" && update.text_delta && options.onThought) {
-              const cleaned = sanitizeText(update.text_delta);
-              if (cleaned) {
-                await options.onThought(cleaned);
-              }
-            } else if (update.step_type === "tool_call" && options.onToolStart) {
-              turnToolCalls++;
-              const toolCallId = `call_${update.step_index || Date.now()}`;
-              await options.onToolStart(toolCallId, update.tool_name || "Tool", update.input || {});
-            } else if (update.step_type === "tool_result" && options.onToolEnd) {
-              const toolCallId = `call_${update.step_index || Date.now()}`;
-              await options.onToolEnd(toolCallId, update.output || "ok");
-            }
-          } else if (data.event === "result" && data.result) {
-            if (data.result.usage) {
-              turnMetrics.inputTokens = data.result.usage.input_tokens || turnMetrics.inputTokens;
-              turnMetrics.outputTokens = data.result.usage.output_tokens || turnMetrics.outputTokens;
-              turnMetrics.thinkingTokens = data.result.usage.thinking_tokens || turnMetrics.thinkingTokens;
-              turnMetrics.cachedTokens = data.result.usage.cache_read_tokens || turnMetrics.cachedTokens;
-            }
-            if (data.result.status === "ERROR") {
-              agyErrorMessage = data.result.error || "AGY returned an error";
-            } else if (!streamedAnyText && data.result.response && options.onChunk) {
-              const cleaned = sanitizeText(data.result.response);
-              if (cleaned) {
-                await options.onChunk(cleaned);
-                streamedAnyText = true;
-              }
-            }
-          }
-        } catch {
-          // Non-JSON line fallback
-          if (options.onChunk && !trimmed.startsWith("Fetching") && !trimmed.startsWith("Checking")) {
-            const cleaned = sanitizeText(line);
-            if (cleaned) {
-              await options.onChunk(cleaned + "\n");
-            }
-          }
-        }
-      };
-
-      const stdoutDecoder = new StringDecoder("utf-8");
-      const stderrDecoder = new StringDecoder("utf-8");
-
-      if (child.stdout) {
-        child.stdout.on("data", async (chunk: Buffer) => {
-          const raw = stdoutDecoder.write(chunk);
-          if (!raw) return;
-          stdoutData += raw;
-          lineBuffer += raw;
-
-          const lines = lineBuffer.split("\n");
-          lineBuffer = lines.pop() || "";
-
-          for (const line of lines) {
-            await processJsonLine(line);
-          }
-        });
-      }
-
-      if (child.stderr) {
-        child.stderr.on("data", (chunk: Buffer) => {
-          const raw = stderrDecoder.write(chunk);
-          if (!raw) return;
-          stderrData += raw;
-          if (options.onStderr) {
-            options.onStderr(raw);
-          }
-        });
-      }
-
-      child.on("error", (err: Error) => {
-        cleanup();
-        reject(new Error(`Failed to spawn Antigravity CLI (${binaryPath}): ${err.message}`));
-      });
-
-      child.on("close", async (code: number | null) => {
-        cleanup();
-        const finalStdout = stdoutDecoder.end();
-        if (finalStdout) {
-          stdoutData += finalStdout;
-          lineBuffer += finalStdout;
-        }
-        if (lineBuffer.trim().length > 0) {
-          await processJsonLine(lineBuffer);
-          lineBuffer = "";
-        }
-
-        if (options.onMetrics) {
-          await options.onMetrics({
-            inputTokens: turnMetrics.inputTokens,
-            outputTokens: turnMetrics.outputTokens,
-            thinkingTokens: turnMetrics.thinkingTokens,
-            cachedTokens: turnMetrics.cachedTokens,
-            toolCalls: turnToolCalls,
-          });
-        }
-
-        if (code !== 0 && !isCancelled) {
-          reject(new Error(agyErrorMessage || stderrData || `AGY process exited with code ${code}`));
-          return;
-        }
-
-        resolve({
-          exitCode: code,
-          stdout: stdoutData,
-          stderr: stderrData,
-          cancelled: isCancelled,
-        });
-      });
+  private createRuntimeFromConfig(
+    cwd: string,
+    model: string,
+    mode: string,
+    conversationId?: string,
+  ): AgySessionRuntime {
+    const worker = new AgyWorker({
+      command: this.options.command ?? { command: this.resolveBinaryPath(), argsPrefix: [] },
+      cwd,
+      model,
+      mode,
+      conversationId,
+      env: this.createEnvironment(),
+      startupTimeoutMs: this.options.startupTimeoutMs,
     });
+    const preparation = worker.start();
+    void preparation.catch(() => undefined);
+    return {
+      worker,
+      preparation,
+      cwd,
+      model,
+      mode,
+      conversationId,
+    };
+  }
+
+  private createEnvironment(): NodeJS.ProcessEnv {
+    const env = { ...(this.options.env ?? process.env) };
+    const proxyUrl =
+      env.HTTPS_PROXY ||
+      env.HTTP_PROXY ||
+      env.https_proxy ||
+      env.http_proxy ||
+      env.ALL_PROXY ||
+      "http://127.0.0.1:7897";
+    return {
+      ...env,
+      HTTP_PROXY: proxyUrl,
+      HTTPS_PROXY: proxyUrl,
+      ALL_PROXY: proxyUrl,
+      http_proxy: proxyUrl,
+      https_proxy: proxyUrl,
+      all_proxy: proxyUrl,
+      CI: "true",
+      PYTHONIOENCODING: "utf-8",
+      PYTHONUTF8: "1",
+      LANG: "zh_CN.UTF-8",
+      LC_ALL: "zh_CN.UTF-8",
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
+      TERM: "dumb",
+    };
   }
 }

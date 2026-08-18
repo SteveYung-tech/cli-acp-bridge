@@ -14,6 +14,10 @@ import { createInterface } from "node:readline";
 import { stdin, stdout } from "node:process";
 
 const logPath = process.env.FAKE_BACKEND_LOG;
+const option = (name) => {
+  const index = process.argv.indexOf(name);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+};
 
 function log(record) {
   if (!logPath) return;
@@ -25,7 +29,13 @@ function emit(event) {
 }
 
 // Startup: log it, emit the init event, then keep the process alive.
-log({ event: "startup", backend: "agy" });
+log({
+  event: "startup",
+  backend: "agy",
+  model: option("--model"),
+  mode: option("--mode"),
+  conversation_id: option("--conversation"),
+});
 emit({
   event: "init",
   conversation_id: "fake-conversation",
@@ -44,6 +54,7 @@ rl.on("line", (line) => {
     message = { text: trimmed };
   }
   log({ event: "prompt", backend: "agy", message });
+  if (message?.message?.content?.[0]?.text === "block") return;
   emit({ event: "step_update", step_update: { step_type: "thought", text_delta: "thinking" } });
   emit({ event: "step_update", step_update: { step_type: "agent_response", text_delta: "hello" } });
   emit({ event: "step_update", step_update: { step_type: "tool", step_index: 1, state: "ACTIVE", tool_info: { tool_name: "fixture", parameters: {} } } });
