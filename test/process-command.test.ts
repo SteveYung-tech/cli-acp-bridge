@@ -160,7 +160,7 @@ test("fake AtomCode daemon emits ChatEvent JSON data frames", async () => {
     assert.deepEqual(events[7], { type: "tokens", prompt: 3, completion: 2, total: 5 });
     assert.deepEqual(events[8], {
       type: "done",
-      session_id: "fake-session",
+      session_id: "fake-session-1",
       stop_reason: "end_turn",
       tokens: 5,
       tool_calls: 1,
@@ -185,8 +185,8 @@ test("fake AtomCode daemon logs startup and every request", async () => {
     const session = await fetch(`http://127.0.0.1:${port}/sessions`, { method: "POST" });
     assert.equal(session.status, 201);
     assert.deepEqual(await session.json(), {
-      id: "fake-session",
-      name: "fake-session",
+      id: "fake-session-1",
+      name: "fake-session-1",
       working_dir: "fixture",
       project_hash: "fake-project",
       created_at: 1_723_939_200,

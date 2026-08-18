@@ -23,7 +23,7 @@ test("AtomCode daemon starts once, creates native sessions, and streams typed ev
   try {
     await Promise.all([daemon.start(), daemon.start()]);
     const native = await daemon.createSession(process.cwd());
-    assert.equal(native.id, "fake-session");
+    assert.equal(native.id, "fake-session-1");
     const events: string[] = [];
     await daemon.chat(
       { message: "hello", working_dir: process.cwd(), session_id: native.id, request_id: "req-1" },

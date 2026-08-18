@@ -1,11 +1,36 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentAdapter, ExecuteTurnOptions, TurnResult } from "../base.js";
 import type { SessionState } from "../../session/manager.js";
-import { AtomCodeStreamParser } from "../../stream/parser.js";
+import type { ProcessCommand } from "../../runtime/process-command.js";
+import {
+  AtomCodeDaemon,
+  type AtomCodeChatEvent,
+  type AtomCodeDaemonOptions,
+  type AtomCodeSession,
+} from "./daemon.js";
+
+const DEFAULT_ATOMCODE_MODEL = "deepseek-v4-flash";
+const DEFAULT_ATOMCODE_MODE = "code";
+
+export interface AtomCodeAdapterOptions {
+  command?: ProcessCommand;
+  env?: NodeJS.ProcessEnv;
+  startupTimeoutMs?: number;
+}
+
+interface AtomCodeSessionRuntime {
+  preparation: Promise<AtomCodeSession>;
+  cwd: string;
+  nativeSessionId?: string;
+  activeRequestId?: string;
+  cancelTarget?: string;
+  cancelRequested: boolean;
+  turnPending: boolean;
+  closed: boolean;
+}
 
 export class AtomCodeAdapter implements AgentAdapter {
   public readonly id = "atomcode";
@@ -13,17 +38,80 @@ export class AtomCodeAdapter implements AgentAdapter {
   public readonly defaultBinaryName = "atomcode";
   public readonly binaryEnvVar = "ATOMCODE_PATH";
 
-  public async start(): Promise<void> {}
+  private readonly daemon: AtomCodeDaemon;
+  private readonly runtimes = new Map<string, AtomCodeSessionRuntime>();
+  private startPromise?: Promise<void>;
+  private disposed = false;
 
-  public createSession(_session: SessionState): void {}
+  public constructor(private readonly options: AtomCodeAdapterOptions = {}) {
+    const daemonOptions: AtomCodeDaemonOptions = {
+      command: options.command ?? { command: this.resolveBinaryPath(), argsPrefix: [] },
+      env: this.createEnvironment(),
+      startupTimeoutMs: options.startupTimeoutMs,
+    };
+    this.daemon = new AtomCodeDaemon(daemonOptions);
+  }
 
-  public async updateSession(_session: SessionState): Promise<void> {}
+  public start(): Promise<void> {
+    if (this.disposed) return Promise.reject(new Error("AtomCode adapter is disposed"));
+    if (!this.startPromise) {
+      this.startPromise = this.daemon.start();
+      void this.startPromise.catch(() => undefined);
+    }
+    return this.startPromise;
+  }
 
-  public async cancelTurn(_sessionId: string): Promise<void> {}
+  public createSession(session: SessionState): void {
+    if (this.disposed) throw new Error("AtomCode adapter is disposed");
+    if (this.runtimes.has(session.id)) return;
+    const runtime: AtomCodeSessionRuntime = {
+      cwd: session.cwd,
+      cancelRequested: false,
+      turnPending: false,
+      closed: false,
+      preparation: Promise.resolve(undefined as unknown as AtomCodeSession),
+    };
+    runtime.preparation = this.start()
+      .then(() => this.daemon.createSession(session.cwd))
+      .then((native) => {
+        runtime.nativeSessionId = native.id;
+        return native;
+      });
+    void runtime.preparation.catch(() => undefined);
+    this.runtimes.set(session.id, runtime);
+  }
 
-  public async closeSession(_sessionId: string): Promise<void> {}
+  public async updateSession(session: SessionState): Promise<void> {
+    const runtime = this.runtimes.get(session.id);
+    if (!runtime) {
+      this.createSession(session);
+      await this.runtimes.get(session.id)!.preparation;
+      return;
+    }
+    await runtime.preparation;
+  }
 
-  public async dispose(): Promise<void> {}
+  public async cancelTurn(sessionId: string): Promise<void> {
+    const runtime = this.runtimes.get(sessionId);
+    if (!runtime?.activeRequestId) return;
+    runtime.cancelRequested = true;
+    await this.daemon.stop(runtime.cancelTarget ?? runtime.activeRequestId);
+  }
+
+  public async closeSession(sessionId: string): Promise<void> {
+    const runtime = this.runtimes.get(sessionId);
+    if (!runtime) return;
+    runtime.closed = true;
+    if (runtime.activeRequestId) await this.cancelTurn(sessionId);
+    this.runtimes.delete(sessionId);
+  }
+
+  public async dispose(): Promise<void> {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.runtimes.clear();
+    await this.daemon.dispose();
+  }
 
   public resolveBinaryPath(): string {
     if (process.env[this.binaryEnvVar] && fs.existsSync(process.env[this.binaryEnvVar]!)) {
@@ -63,7 +151,7 @@ export class AtomCodeAdapter implements AgentAdapter {
         name: "Model",
         description: "Select LLM model for AtomCode",
         type: "select",
-        currentValue: session.model || "deepseek-v4-flash",
+        currentValue: session.model || DEFAULT_ATOMCODE_MODEL,
         options: [
           { value: "deepseek-v4-flash", name: "DeepSeek V4 Flash (Default)" },
           { value: "deepseek-v4", name: "DeepSeek V4" },
@@ -76,7 +164,7 @@ export class AtomCodeAdapter implements AgentAdapter {
         name: "Mode",
         description: "Select agent operating mode",
         type: "select",
-        currentValue: session.mode || "code",
+        currentValue: session.mode || DEFAULT_ATOMCODE_MODE,
         options: [
           { value: "code", name: "Code (Agentic Coding)" },
           { value: "architect", name: "Architect (Planning)" },
@@ -142,179 +230,152 @@ export class AtomCodeAdapter implements AgentAdapter {
   }
 
   public async executeTurn(options: ExecuteTurnOptions): Promise<TurnResult> {
-    const binaryPath = this.resolveBinaryPath();
-    const args: string[] = [];
-
-    if (options.continueSession) {
-      args.push("-c");
+    if (this.disposed) throw new Error("AtomCode adapter is disposed");
+    const runtime = this.runtimes.get(options.sessionId);
+    if (!runtime) throw new Error(`Unknown or closed AtomCode ACP session: ${options.sessionId}`);
+    if (runtime.closed) throw new Error(`Closed AtomCode ACP session: ${options.sessionId}`);
+    if (runtime.turnPending || runtime.activeRequestId) {
+      throw new Error("An AtomCode turn is already active for this ACP session");
+    }
+    if (options.signal?.aborted) {
+      return { exitCode: null, stdout: "", stderr: "", cancelled: true };
     }
 
-    if (options.cwd) {
-      args.push("-C", options.cwd);
+    runtime.turnPending = true;
+    let native: AtomCodeSession;
+    try {
+      native = await runtime.preparation;
+    } catch (error) {
+      runtime.turnPending = false;
+      throw error;
     }
-
-    if (options.model) {
-      args.push("--model", options.model);
+    runtime.turnPending = false;
+    if (runtime.closed || this.runtimes.get(options.sessionId) !== runtime) {
+      throw new Error(`Closed AtomCode ACP session: ${options.sessionId}`);
     }
+    if (runtime.activeRequestId) throw new Error("An AtomCode turn is already active for this ACP session");
+    const requestId = crypto.randomUUID();
+    runtime.activeRequestId = requestId;
+    runtime.cancelTarget = requestId;
+    runtime.cancelRequested = false;
+    let terminal: "done" | "stopped" | undefined;
+    let textOutput = "";
+    let toolCalls = 0;
+    const abortListener = () => void this.cancelTurn(options.sessionId).catch(() => undefined);
+    options.signal?.addEventListener("abort", abortListener, { once: true });
 
-    if (options.provider) {
-      args.push("--provider", options.provider);
-    }
-
-    args.push("-p", options.prompt);
-    args.push("-y");
-    args.push("-v");
-    args.push("--dev");
-    args.push("--no-telemetry");
-
-    const streamParser = new AtomCodeStreamParser();
-
-    return new Promise((resolve, reject) => {
-      let stdoutData = "";
-      let stderrData = "";
-      let isCancelled = false;
-      let turnToolCalls = 0;
-      let turnMetrics = {
-        inputTokens: 0,
-        outputTokens: 0,
-        thinkingTokens: 0,
-        cachedTokens: 0,
-      };
-
-      const child: ChildProcess = spawn(binaryPath, args, {
-        cwd: options.cwd || process.cwd(),
-        env: {
-          ...process.env,
-          CI: "true",
-          PYTHONIOENCODING: "utf-8",
-          PYTHONUTF8: "1",
-          LANG: "zh_CN.UTF-8",
-          LC_ALL: "zh_CN.UTF-8",
-          NO_COLOR: "1",
-          FORCE_COLOR: "0",
-          TERM: "dumb",
-        },
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-      });
-
-      const cleanup = () => {
-        if (options.signal) {
-          options.signal.removeEventListener("abort", onAbort);
+    try {
+      await this.daemon.chat({
+        message: options.prompt,
+        working_dir: options.cwd ?? runtime.cwd,
+        session_id: native.id,
+        request_id: requestId,
+        provider: options.model ?? options.provider ?? DEFAULT_ATOMCODE_MODEL,
+      }, async (event) => {
+        if (event.type === "session_assigned" && typeof event.session_id === "string") {
+          runtime.nativeSessionId = event.session_id;
+          runtime.cancelTarget = event.session_id;
+          return;
         }
-      };
-
-      const onAbort = () => {
-        isCancelled = true;
-        try {
-          if (child.pid) {
-            if (process.platform === "win32") {
-              spawn("taskkill", ["/pid", child.pid.toString(), "/f", "/t"]);
-            } else {
-              child.kill("SIGTERM");
-            }
+        if (event.type === "error") {
+          throw new Error(this.eventString(event.message ?? event.error, "AtomCode returned an error"));
+        }
+        if (event.type === "stopped") {
+          terminal = "stopped";
+          runtime.cancelRequested = true;
+          return;
+        }
+        if (event.type === "done") {
+          terminal = "done";
+          if (!runtime.cancelRequested && options.onMetrics) {
+            await options.onMetrics({
+              toolCalls: typeof event.tool_calls === "number" ? event.tool_calls : toolCalls,
+            });
           }
-        } catch (err) {
-          console.error("Error killing AtomCode process:", err);
+          return;
         }
-      };
+        if (runtime.cancelRequested) return;
+        await this.forwardEvent(event, options, () => { toolCalls++; }, (text) => { textOutput += text; });
+      }, options.signal);
 
-      if (options.signal) {
-        if (options.signal.aborted) {
-          onAbort();
-          cleanup();
-          return resolve({
-            exitCode: null,
-            stdout: "",
-            stderr: "",
-            cancelled: true,
-          });
-        }
-        options.signal.addEventListener("abort", onAbort, { once: true });
+      if (runtime.cancelRequested || terminal === "stopped") {
+        return { exitCode: null, stdout: textOutput, stderr: "", cancelled: true };
       }
-
-      const handleEvent = async (event: ReturnType<typeof streamParser.parseChunk>[0]) => {
-        if (event.type === "thought" && event.content && options.onThought) {
-          await options.onThought(event.content);
-        } else if (event.type === "tool_call_start" && event.toolCallId && options.onToolStart) {
-          turnToolCalls++;
-          await options.onToolStart(event.toolCallId, event.toolName || "Tool", event.toolInput);
-        } else if (event.type === "tool_call_end" && event.toolCallId && options.onToolEnd) {
-          await options.onToolEnd(event.toolCallId, event.toolResult || "ok");
-        } else if (event.type === "tokens" && event.metrics) {
-          turnMetrics.inputTokens = event.metrics.inputTokens || turnMetrics.inputTokens;
-          turnMetrics.outputTokens = event.metrics.outputTokens || turnMetrics.outputTokens;
-          turnMetrics.cachedTokens = event.metrics.cachedTokens || turnMetrics.cachedTokens;
-          turnMetrics.thinkingTokens = event.metrics.thinkingTokens || turnMetrics.thinkingTokens;
-        } else if (event.type === "text" && event.content && options.onChunk) {
-          await options.onChunk(event.content);
-        }
-      };
-
-      const stdoutDecoder = new StringDecoder("utf-8");
-      const stderrDecoder = new StringDecoder("utf-8");
-
-      if (child.stdout) {
-        child.stdout.on("data", async (chunk: Buffer) => {
-          const raw = stdoutDecoder.write(chunk);
-          if (!raw) return;
-          stdoutData += raw;
-          const events = streamParser.parseChunk(raw);
-          for (const ev of events) {
-            await handleEvent(ev);
-          }
-        });
+      if (terminal !== "done") throw new Error("AtomCode chat stream ended without a terminal event");
+      return { exitCode: null, stdout: textOutput, stderr: "", cancelled: false };
+    } catch (error) {
+      if (runtime.cancelRequested || options.signal?.aborted) {
+        return { exitCode: null, stdout: textOutput, stderr: "", cancelled: true };
       }
-
-      if (child.stderr) {
-        child.stderr.on("data", async (chunk: Buffer) => {
-          const raw = stderrDecoder.write(chunk);
-          if (!raw) return;
-          stderrData += raw;
-          const events = streamParser.parseChunk(raw);
-          for (const ev of events) {
-            await handleEvent(ev);
-          }
-        });
+      throw error;
+    } finally {
+      options.signal?.removeEventListener("abort", abortListener);
+      if (runtime.activeRequestId === requestId) {
+        runtime.activeRequestId = undefined;
+        runtime.cancelTarget = undefined;
+        runtime.cancelRequested = false;
       }
+    }
+  }
 
-      child.on("error", (err: Error) => {
-        cleanup();
-        reject(new Error(`Failed to spawn AtomCode CLI (${binaryPath}): ${err.message}`));
+  private async forwardEvent(
+    event: AtomCodeChatEvent,
+    options: ExecuteTurnOptions,
+    countTool: () => void,
+    appendText: (text: string) => void,
+  ): Promise<void> {
+    if (event.type === "text" && typeof event.content === "string") {
+      appendText(event.content);
+      await options.onChunk?.(event.content);
+    } else if (event.type === "reasoning" && typeof event.content === "string") {
+      await options.onThought?.(event.content);
+    } else if (event.type === "tool_start" && typeof event.id === "string") {
+      countTool();
+      await options.onToolStart?.(
+        event.id,
+        typeof event.name === "string" ? event.name : "Tool",
+        this.parseToolArguments(event.arguments),
+      );
+    } else if (event.type === "tool_result" && typeof event.id === "string") {
+      await options.onToolEnd?.(event.id, this.eventString(event.output, "ok"));
+    } else if (event.type === "tokens") {
+      await options.onMetrics?.({
+        inputTokens: typeof event.prompt === "number" ? event.prompt : undefined,
+        outputTokens: typeof event.completion === "number" ? event.completion : undefined,
       });
+    }
+  }
 
-      child.on("close", async (code: number | null) => {
-        cleanup();
-        const finalStdout = stdoutDecoder.end();
-        if (finalStdout) {
-          stdoutData += finalStdout;
-          const events = streamParser.parseChunk(finalStdout);
-          for (const ev of events) {
-            await handleEvent(ev);
-          }
-        }
-        const remaining = streamParser.flush();
-        for (const ev of remaining) {
-          await handleEvent(ev);
-        }
+  private parseToolArguments(value: unknown): unknown {
+    if (typeof value !== "string") return value ?? {};
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
 
-        if (options.onMetrics) {
-          await options.onMetrics({
-            inputTokens: turnMetrics.inputTokens,
-            outputTokens: turnMetrics.outputTokens,
-            thinkingTokens: turnMetrics.thinkingTokens,
-            cachedTokens: turnMetrics.cachedTokens,
-            toolCalls: turnToolCalls,
-          });
-        }
+  private eventString(value: unknown, fallback: string): string {
+    if (typeof value === "string") return value;
+    if (value === undefined || value === null) return fallback;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
 
-        resolve({
-          exitCode: code,
-          stdout: stdoutData,
-          stderr: stderrData,
-          cancelled: isCancelled,
-        });
-      });
-    });
+  private createEnvironment(): NodeJS.ProcessEnv {
+    return {
+      ...(this.options.env ?? process.env),
+      CI: "true",
+      PYTHONIOENCODING: "utf-8",
+      PYTHONUTF8: "1",
+      LANG: "zh_CN.UTF-8",
+      LC_ALL: "zh_CN.UTF-8",
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
+      TERM: "dumb",
+    };
   }
 }
