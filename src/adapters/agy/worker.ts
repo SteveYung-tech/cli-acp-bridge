@@ -37,6 +37,9 @@ interface ActiveTurn {
   signal?: AbortSignal;
   abortListener?: () => void;
   settled: boolean;
+  cancelRequested: boolean;
+  nextToolId: number;
+  toolIds: Map<string, string>;
 }
 
 function errorMessage(value: unknown, fallback: string): string {
@@ -50,11 +53,14 @@ export class AgyWorker {
   private child?: ChildProcessWithoutNullStreams;
   private startPromise?: Promise<void>;
   private disposePromise?: Promise<void>;
+  private stopPromise?: Promise<void>;
   private active?: ActiveTurn;
   private ready = false;
   private disposed = false;
   private expectedExit = false;
+  private sawExit = false;
   private fatalError?: Error;
+  private terminalError?: Error;
   private outputChain: Promise<void> = Promise.resolve();
   private stdoutBuffer = "";
   private retainedStderr = "";
@@ -84,6 +90,7 @@ export class AgyWorker {
 
   public start(): Promise<void> {
     if (this.disposed) return Promise.reject(new Error("AGY worker is disposed"));
+    if (this.terminalError) return Promise.reject(this.terminalError);
     if (this.ready) return Promise.resolve();
     if (this.fatalError) return Promise.reject(this.fatalError);
     if (this.startPromise) return this.startPromise;
@@ -122,7 +129,6 @@ export class AgyWorker {
     this.startupTimer = setTimeout(() => {
       const diagnostics = this.retainedStderr ? `: ${this.retainedStderr}` : "";
       this.fail(new Error(`AGY startup timed out after ${timeoutMs}ms${diagnostics}`));
-      void this.stopChild();
     }, timeoutMs);
 
     return this.startPromise;
@@ -153,6 +159,9 @@ export class AgyWorker {
         metrics: { inputTokens: 0, outputTokens: 0, thinkingTokens: 0, cachedTokens: 0 },
         signal,
         settled: false,
+        cancelRequested: false,
+        nextToolId: 0,
+        toolIds: new Map(),
       };
     });
 
@@ -170,8 +179,15 @@ export class AgyWorker {
       },
     };
 
+    const stdin = this.child.stdin;
+    if (!stdin.writable || stdin.writableEnded || stdin.destroyed) {
+      this.fail(new Error("Failed to write AGY prompt: stdin is closed"));
+      return turnPromise;
+    }
     try {
-      this.child.stdin.write(`${JSON.stringify(input)}\n`);
+      stdin.write(`${JSON.stringify(input)}\n`, (error) => {
+        if (error) this.fail(new Error(`Failed to write AGY prompt: ${error.message}`));
+      });
       this._used = true;
       this.trace.mark("prompt_written");
     } catch (error) {
@@ -184,29 +200,32 @@ export class AgyWorker {
   public async cancel(): Promise<void> {
     const turn = this.active;
     if (!turn) return;
+    turn.cancelRequested = true;
+    this.terminalError = new Error("AGY worker was cancelled and is terminal");
     this.expectedExit = true;
+    this.finishCancelled(turn);
     try {
       await this.stopChild();
-    } finally {
-      if (this.active === turn) this.finishCancelled(turn);
+    } catch (error) {
+      throw this.asError(error, "Failed to stop cancelled AGY worker");
     }
   }
 
   public dispose(): Promise<void> {
     if (this.disposePromise) return this.disposePromise;
     this.disposed = true;
+    this.ready = false;
+    const disposalError = new Error("AGY worker was disposed during startup");
+    this.rejectStart?.(disposalError);
+    this.clearStartSettlement();
     this.disposePromise = (async () => {
       const turn = this.active;
-      this.expectedExit = true;
-      try {
-        await this.stopChild();
-      } finally {
-        if (turn && this.active === turn) this.finishCancelled(turn);
-        if (this.rejectStart) {
-          this.rejectStart(new Error("AGY worker was disposed during startup"));
-          this.clearStartSettlement();
-        }
+      if (turn) {
+        turn.cancelRequested = true;
+        this.finishCancelled(turn);
       }
+      this.expectedExit = true;
+      await this.stopChild();
     })();
     return this.disposePromise;
   }
@@ -239,7 +258,27 @@ export class AgyWorker {
     child.stdin.on("error", (error) => {
       if (!this.disposed && !this.fatalError) this.fail(new Error(`AGY stdin failed: ${error.message}`));
     });
+    child.stdin.once("close", () => {
+      if (!this.disposed && !this.expectedExit && !this.sawExit && !this.fatalError) {
+        this.fail(new Error("AGY stdin closed unexpectedly"));
+      }
+    });
     child.once("error", (error) => this.fail(new Error(`Failed to spawn AGY: ${error.message}`)));
+    child.once("exit", (code, signal) => {
+      this.sawExit = true;
+      this.ready = false;
+      if (this.disposed || this.expectedExit || this.fatalError) return;
+
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.handleExit(code, signal);
+      };
+      const timer = setTimeout(finish, 25);
+      child.once("close", finish);
+    });
     child.once("close", (code, signal) => {
       const stdoutTail = this.stdoutDecoder.end();
       if (stdoutTail) this.stdoutBuffer += stdoutTail;
@@ -247,7 +286,7 @@ export class AgyWorker {
       this.stdoutBuffer = "";
       const stderrTail = this.stderrDecoder.end();
       if (stderrTail) this.retainStderr(stderrTail);
-      void this.outputChain.then(() => this.handleExit(code, signal));
+      if (!this.sawExit) void this.outputChain.then(() => this.handleExit(code, signal));
     });
   }
 
@@ -271,6 +310,7 @@ export class AgyWorker {
 
     if (data.event === "init") {
       if (!this.ready) {
+        if (this.disposed || this.terminalError || this.fatalError) return;
         this.ready = true;
         this._conversationId = data.conversation_id ?? data.init?.conversation_id ?? this._conversationId;
         if (this.startupTimer) clearTimeout(this.startupTimer);
@@ -283,7 +323,7 @@ export class AgyWorker {
     }
 
     const turn = this.active;
-    if (!turn) return;
+    if (!turn || turn.settled || turn.cancelRequested) return;
     turn.stdout += `${line}\n`;
 
     if (data.event === "step_update" && data.step_update) {
@@ -298,18 +338,29 @@ export class AgyWorker {
       } else if (update.step_type === "thought" && update.text_delta && turn.callbacks.onThought) {
         const text = sanitizeText(update.text_delta);
         if (text) await turn.callbacks.onThought(text);
-      } else if (update.step_type === "tool_call" && turn.callbacks.onToolStart) {
-        turn.toolCalls++;
-        await turn.callbacks.onToolStart(
-          `call_${update.step_index ?? Date.now()}`,
-          update.tool_name ?? "Tool",
-          update.input ?? {},
-        );
-      } else if (update.step_type === "tool_result" && turn.callbacks.onToolEnd) {
-        await turn.callbacks.onToolEnd(
-          `call_${update.step_index ?? Date.now()}`,
-          update.output ?? "ok",
-        );
+      } else if (update.step_type === "tool" && update.tool_info) {
+        const key = String(update.step_index ?? update.tool_info.tool_name ?? "tool");
+        if (update.state === "ACTIVE") {
+          const id = `call_${update.step_index ?? ++turn.nextToolId}`;
+          turn.toolIds.set(key, id);
+          turn.toolCalls++;
+          if (turn.callbacks.onToolStart) {
+            await turn.callbacks.onToolStart(
+              id,
+              update.tool_info.tool_name ?? "Tool",
+              update.tool_info.parameters ?? {},
+            );
+          }
+        } else if (update.state === "DONE" || update.state === "ERROR") {
+          const id = turn.toolIds.get(key) ?? `call_${update.step_index ?? ++turn.nextToolId}`;
+          turn.toolIds.delete(key);
+          if (turn.callbacks.onToolEnd) {
+            const output = update.state === "ERROR"
+              ? update.tool_info.error ?? update.tool_info.output ?? "Tool failed"
+              : update.tool_info.output ?? "ok";
+            await turn.callbacks.onToolEnd(id, this.stringifyToolOutput(output));
+          }
+        }
       }
       return;
     }
@@ -317,6 +368,11 @@ export class AgyWorker {
     if (data.event !== "result" || !data.result) return;
     this.updateMetrics(turn, data.result.usage);
     this._conversationId = data.result.conversation_id ?? this._conversationId;
+
+    if (turn.callbacks.onMetrics) {
+      await turn.callbacks.onMetrics({ ...turn.metrics, toolCalls: turn.toolCalls });
+    }
+    if (turn.settled || turn.cancelRequested) return;
 
     if (data.result.status === "ERROR") {
       this.rejectTurn(turn, new Error(errorMessage(data.result.error, "AGY returned an error")));
@@ -330,9 +386,7 @@ export class AgyWorker {
         await turn.callbacks.onChunk(text);
       }
     }
-    if (turn.callbacks.onMetrics) {
-      await turn.callbacks.onMetrics({ ...turn.metrics, toolCalls: turn.toolCalls });
-    }
+    if (turn.settled || turn.cancelRequested) return;
     this.resolveTurn(turn, {
       exitCode: null,
       stdout: turn.stdout,
@@ -350,6 +404,15 @@ export class AgyWorker {
     turn.metrics.cachedTokens = usage.cache_read_tokens ?? turn.metrics.cachedTokens;
   }
 
+  private stringifyToolOutput(value: unknown): string {
+    if (typeof value === "string") return value;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
   private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
     this.ready = false;
     if (this.disposed || this.expectedExit) return;
@@ -362,13 +425,16 @@ export class AgyWorker {
   private fail(error: Error): void {
     if (this.fatalError || this.disposed) return;
     this.fatalError = error;
+    this.terminalError = error;
     this.ready = false;
     if (this.startupTimer) clearTimeout(this.startupTimer);
     this.startupTimer = undefined;
     this.rejectStart?.(error);
     this.clearStartSettlement();
     if (this.active) this.rejectTurn(this.active, error);
-    void this.stopChild();
+    void this.stopChild().catch((stopError) => {
+      this.retainStderr(`\nFailed to stop AGY worker: ${this.asError(stopError, "unknown error").message}`);
+    });
   }
 
   private resolveTurn(turn: ActiveTurn, result: TurnResult): void {
@@ -409,9 +475,11 @@ export class AgyWorker {
   }
 
   private async stopChild(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
     const child = this.child;
     if (!child) return;
-    await terminateProcess(child);
+    this.stopPromise = terminateProcess(child);
+    return this.stopPromise;
   }
 
   private asError(value: unknown, fallback: string): Error {

@@ -46,6 +46,8 @@ rl.on("line", (line) => {
   log({ event: "prompt", backend: "agy", message });
   emit({ event: "step_update", step_update: { step_type: "thought", text_delta: "thinking" } });
   emit({ event: "step_update", step_update: { step_type: "agent_response", text_delta: "hello" } });
+  emit({ event: "step_update", step_update: { step_type: "tool", step_index: 1, state: "ACTIVE", tool_info: { tool_name: "fixture", parameters: {} } } });
+  emit({ event: "step_update", step_update: { step_type: "tool", step_index: 1, state: "DONE", tool_info: { tool_name: "fixture", output: "ok" } } });
   emit({ event: "step_update", step_update: { step_type: "agent_response", text_delta: " world" } });
   emit({
     event: "result",

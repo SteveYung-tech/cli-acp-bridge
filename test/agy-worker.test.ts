@@ -156,8 +156,8 @@ test("AGY rejects an active turn on unexpected process exit with stderr", async 
   await settlesWithin(worker.dispose());
 });
 
-test("AGY awaits callbacks in protocol order before resolving the turn", async () => {
-  const source = `console.log(JSON.stringify({event:"init",conversation_id:"c"})); process.stdin.once("data",()=>{for(const event of [{event:"step_update",step_update:{step_type:"thought",text_delta:"think"}},{event:"step_update",step_update:{step_type:"agent_response",text_delta:"answer"}},{event:"step_update",step_update:{step_type:"tool_call",step_index:4,tool_name:"read",input:{path:"a"}}},{event:"step_update",step_update:{step_type:"tool_result",step_index:4,output:"done"}},{event:"result",result:{status:"SUCCESS",usage:{input_tokens:3,output_tokens:2,thinking_tokens:1,cache_read_tokens:4}}}]) console.log(JSON.stringify(event))})`;
+test("AGY awaits callbacks in protocol order for the real tool event schema", async () => {
+  const source = `console.log(JSON.stringify({event:"init",conversation_id:"c"})); process.stdin.once("data",()=>{for(const event of [{event:"step_update",step_update:{step_type:"thought",text_delta:"think"}},{event:"step_update",step_update:{step_type:"agent_response",text_delta:"answer"}},{event:"step_update",step_update:{step_type:"tool",step_index:4,state:"ACTIVE",tool_info:{tool_name:"read",parameters:{path:"a"}}}},{event:"step_update",step_update:{step_type:"tool",step_index:4,state:"DONE",tool_info:{tool_name:"read",output:"done"}}},{event:"result",result:{status:"SUCCESS",usage:{input_tokens:3,output_tokens:2,thinking_tokens:1,cache_read_tokens:4}}}]) console.log(JSON.stringify(event))})`;
   const worker = createScriptedWorker(source);
   const calls: string[] = [];
   const delayed = (value: string) => new Promise<void>((resolve) => setTimeout(() => { calls.push(value); resolve(); }, 5));
@@ -175,6 +175,89 @@ test("AGY awaits callbacks in protocol order before resolving the turn", async (
       "thought:think", "chunk:answer", 'start:call_4:read:{"path":"a"}', "end:call_4:done",
       'metrics:{"inputTokens":3,"outputTokens":2,"thinkingTokens":1,"cachedTokens":4,"toolCalls":1}', "resolved",
     ]);
+  } finally {
+    await worker.dispose();
+  }
+});
+
+test("AGY cancellation wins over a result callback already in flight", async () => {
+  const source = `console.log(JSON.stringify({event:"init",conversation_id:"c"})); process.stdin.on("data",()=>console.log(JSON.stringify({event:"result",result:{status:"SUCCESS",response:"late"}}))); process.stdin.on("end",()=>setTimeout(()=>process.exit(0),250)); setInterval(()=>{},1000)`;
+  const worker = createScriptedWorker(source);
+  const controller = new AbortController();
+  let entered!: () => void;
+  const callbackEntered = new Promise<void>((resolve) => { entered = resolve; });
+  try {
+    await worker.start();
+    const turn = worker.runTurn("hello", {
+      onChunk: async () => {
+        entered();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      },
+    }, controller.signal);
+    await callbackEntered;
+    controller.abort();
+    assert.equal((await settlesWithin(turn, 1_000)).cancelled, true);
+  } finally {
+    await worker.dispose();
+  }
+});
+
+test("AGY rejects a turn when the child stdin pipe is already closed", async () => {
+  const source = `console.log(JSON.stringify({event:"init",conversation_id:"c"})); process.stdin.resume()`;
+  const worker = createScriptedWorker(source);
+  try {
+    await worker.start();
+    const child = (worker as unknown as { child: { stdin: { destroy(): void } } }).child;
+    child.stdin.destroy();
+    await assert.rejects(settlesWithin(worker.runTurn("hello", {}), 500), /stdin|write/i);
+  } finally {
+    await worker.dispose();
+  }
+});
+
+test("disposing during startup rejects the pending start even if init arrives late", async () => {
+  const source = `setTimeout(()=>console.log(JSON.stringify({event:"init",conversation_id:"c"})),100); process.stdin.resume()`;
+  const worker = createScriptedWorker(source);
+  const start = worker.start();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const disposal = worker.dispose();
+  await assert.rejects(settlesWithin(start), /disposed/i);
+  await settlesWithin(disposal);
+});
+
+test("a cancelled worker cannot report itself ready again", async () => {
+  const source = `console.log(JSON.stringify({event:"init",conversation_id:"c"})); process.stdin.resume()`;
+  const worker = createScriptedWorker(source);
+  await worker.start();
+  const turn = worker.runTurn("hello", {});
+  await worker.cancel();
+  assert.equal((await settlesWithin(turn)).cancelled, true);
+  await assert.rejects(worker.start(), /cancelled|stopped|terminal/i);
+  await worker.dispose();
+});
+
+test("AGY rejects on process exit without waiting for inherited stdio to close", async () => {
+  const source = `console.log(JSON.stringify({event:"init",conversation_id:"c"})); process.stdin.once("data",()=>{process.stderr.write("parent failed"); process.exit(7)})`;
+  const worker = createScriptedWorker(source);
+  await worker.start();
+  const child = (worker as unknown as {
+    child: { once(event: string, listener: (...args: any[]) => void): unknown; removeAllListeners(event: string): void };
+  }).child;
+  child.removeAllListeners("close");
+  const originalOnce = child.once.bind(child);
+  child.once = (event, listener) => event === "close" ? child : originalOnce(event, listener);
+  await assert.rejects(settlesWithin(worker.runTurn("hello", {}), 300), /exited.*code 7/i);
+  await worker.dispose();
+});
+
+test("AGY counts tools without display callbacks and reports metrics before error rejection", async () => {
+  const source = `console.log(JSON.stringify({event:"init",conversation_id:"c"})); process.stdin.once("data",()=>{for(const event of [{event:"step_update",step_update:{step_type:"tool",step_index:2,state:"ACTIVE",tool_info:{tool_name:"read",parameters:{}}}},{event:"result",result:{status:"ERROR",error:"failed",usage:{input_tokens:5,output_tokens:1,thinking_tokens:2,cache_read_tokens:3}}}]) console.log(JSON.stringify(event))})`;
+  const worker = createScriptedWorker(source);
+  const metrics: unknown[] = [];
+  try {
+    await worker.start();
+    await assert.rejects(worker.runTurn("hello", { onMetrics: (value) => metrics.push(value) }), /failed/);
+    assert.deepEqual(metrics, [{ inputTokens: 5, outputTokens: 1, thinkingTokens: 2, cachedTokens: 3, toolCalls: 1 }]);
   } finally {
     await worker.dispose();
   }
