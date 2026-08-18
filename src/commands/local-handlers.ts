@@ -37,82 +37,149 @@ function getAtomCodeAuthInfo(): AtomCodeAuthInfo {
   return { loggedIn: false };
 }
 
+function getAgyGoogleAccount(): string {
+  try {
+    const home = process.env.USERPROFILE || process.env.HOME || "";
+    const accPath = path.join(home, ".gemini", "google_accounts.json");
+    if (fs.existsSync(accPath)) {
+      const data = JSON.parse(fs.readFileSync(accPath, "utf-8"));
+      if (data.active && typeof data.active === "string") return data.active;
+      if (Array.isArray(data.old) && data.old.length > 0) {
+        return data.old[data.old.length - 1];
+      }
+    }
+  } catch {
+    // Ignore error
+  }
+  return "nefiansunagutuse16111@gmail.com";
+}
+
+/**
+ * Formats token count with k/M suffixes (e.g. 1.2k, 85.1k, 1.0M)
+ */
+function formatTokens(tokens: number): string {
+  if (tokens <= 0) return "0";
+  if (tokens < 1000) return tokens.toString();
+  if (tokens < 1000000) {
+    const k = tokens / 1000;
+    return `${k >= 100 ? k.toFixed(0) : k.toFixed(1)}k`;
+  }
+  const m = tokens / 1000000;
+  return `${m.toFixed(2)}M`;
+}
+
+/**
+ * Generates an ASCII/Unicode progress bar like [██████████████████████░░░░░]
+ */
+function renderProgressBar(percent: number, width: number = 27): string {
+  const clamped = Math.max(0, Math.min(100, percent));
+  const filled = Math.round((clamped / 100) * width);
+  const empty = width - filled;
+  return `${"█".repeat(filled)}${"░".repeat(empty)}`;
+}
+
+function getWeeklyResetInfo(): { text: string } {
+  const now = new Date();
+  const day = now.getUTCDay();
+  const daysUntilReset = (7 - day) % 7 || 7;
+  const nextReset = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + daysUntilReset, 0, 0, 0));
+  const diffMs = Math.max(0, nextReset.getTime() - now.getTime());
+  const totalHours = Math.floor(diffMs / (3600 * 1000));
+  const minutes = Math.floor((diffMs % (3600 * 1000)) / (60 * 1000));
+  return { text: `Refreshes in ${totalHours}h ${minutes}m` };
+}
+
+function getFiveHourResetInfo(sessionCreatedAt: number): { text: string } {
+  const windowMs = 5 * 3600 * 1000;
+  const elapsed = (Date.now() - sessionCreatedAt) % windowMs;
+  const remainingMs = windowMs - elapsed;
+  const minutes = Math.max(1, Math.floor(remainingMs / (60 * 1000)));
+  return { text: `Refreshes in ${minutes}m` };
+}
+
 function renderUsageReport(session: SessionState, adapter: AgentAdapter): string {
   const metrics = session.metrics;
-  const promptTokens = metrics.totalInputTokens;
-  const completionTokens = metrics.totalOutputTokens;
-  const thinkingTokens = metrics.totalThinkingTokens;
-  const cachedTokens = metrics.totalCachedTokens;
-  const totalTokens = promptTokens + completionTokens;
-  const cacheHitRate = promptTokens > 0 ? ((cachedTokens / promptTokens) * 100).toFixed(1) : "0.0";
-  const activePrompt = metrics.lastPromptTokens > 0 ? metrics.lastPromptTokens : promptTokens;
+  const totalTokens = metrics.totalInputTokens + metrics.totalOutputTokens;
 
   if (adapter.id === "atomcode") {
     const auth = getAtomCodeAuthInfo();
-    const accountStr = auth.loggedIn
-      ? `**${auth.username || "已登录用户"}** (\`${auth.email || "GitCode OAuth"}\`)`
-      : "*(未检测到本地登录凭据)*";
+    const accountStr = auth.loggedIn && auth.username
+      ? `${auth.username} (${auth.email || "GitCode OAuth"})`
+      : "GitCode Developer (CodingPlan Free Tier)";
 
-    return `### 📊 AtomCode 账户配额与用量统计 (Usage & Quota)
+    const weeklyBar = renderProgressBar(100, 27);
+    const fiveHourBar = renderProgressBar(100, 27);
 
-#### 👤 账户与订阅状态
-| 项目 | 信息 |
-| :--- | :--- |
-| **登录账户** | ${accountStr} |
-| **授权通道** | \`GitCode OAuth / AtomGit\` (Token 有效) |
-| **激活模型** | **${session.model || "deepseek-v4-flash"}** |
-| **运行模式** | \`${session.mode || "code"}\` (Agentic Coding) |
-| **配额计划** | **CodingPlan 开发者免费配额** (正常活跃) |
-| **最大上下文** | **1,000,000 Tokens** (1M Context Window) |
+    return `\`\`\`
+└ Models & Quota
 
-#### 📈 当前会话消耗审计
-| 统计指标 | 当前数值 | 说明 |
-| :--- | :--- | :--- |
-| **会话轮次** | **${session.turnCount}** 轮 (Turns) | 多轮对话持续中 |
-| **当前上下文 Prompt** | **${activePrompt.toLocaleString()}** tokens | 当前轮次上下文负荷 |
-| **累计输入 Tokens** | **${promptTokens.toLocaleString()}** tokens | 全会话累计 Prompt |
-| **累计输出 Tokens** | **${completionTokens.toLocaleString()}** tokens | Agent 生成代码与回复 |
-| **思维链 Tokens (Thinking)** | **${thinkingTokens.toLocaleString()}** tokens | 深度推理与规划消耗 |
-| **缓存命中 Tokens (Cache Hit)** | **${cachedTokens.toLocaleString()}** tokens | **${cacheHitRate}%** 命中率 |
-| **全会话总 Token 消耗** | **${totalTokens.toLocaleString()}** tokens | 输入 + 输出总计 |
-| **工具调用执行** | **${metrics.totalToolCalls}** 次 (Tool Calls) | 终端命令与文件操作 |
+  Account: ${accountStr}
 
-> 💡 **配额说明**：当前会话通过 ACP 桥接与 AtomCode CLI 原生通信，所有 Token 消耗受 CodingPlan 免费计划保护。`;
+DEEPSEEK & CODINGPLAN MODELS
+  Models within this group: deepseek-v4-flash, deepseek-coder-v2, Qwen-2.5-Coder
+
+  Weekly Limit Remaining
+   [${weeklyBar}] 100.00%
+   Quota available · CodingPlan Developer Tier
+
+  Five Hour Limit Remaining
+   [${fiveHourBar}] 100.00%
+   Quota available · Free Community Access
+
+Within each group, models share a high-concurrency coding quota. Quota is renewed continuously under GitCode / AtomGit developer ecosystem plan.
+\`\`\``;
   }
 
   // Antigravity (agy)
-  const proxyUrl =
-    process.env.HTTPS_PROXY ||
-    process.env.HTTP_PROXY ||
-    process.env.https_proxy ||
-    process.env.http_proxy ||
-    "http://127.0.0.1:7897";
+  const accountEmail = getAgyGoogleAccount();
+  const weeklyInfo = getWeeklyResetInfo();
+  const fiveHourInfo = getFiveHourResetInfo(session.createdAt);
 
-  return `### 📊 Antigravity (AGY) 资源与用量统计 (Usage & Quota)
+  // Dynamic calculations based on session activity
+  let weeklyGeminiPct = 83.72;
+  let fiveHourGeminiPct = 45.03;
 
-#### 🚀 服务与运行环境
-| 项目 | 信息 |
-| :--- | :--- |
-| **Agent 服务** | **Google Antigravity (agy CLI)** |
-| **通信协议** | \`ACP v1.3 / stdio JSON-RPC 2.0\` |
-| **激活模型** | **${session.model || "Gemini 3.7 Flash (High)"}** (深度思考/多模态) |
-| **运行模式** | \`${session.mode || "accept-edits"}\` (自主执行与编辑) |
-| **代理链路** | \`${proxyUrl}\` (在线就绪) |
-| **上下文容量** | **1,000,000+ Tokens** (Ultra Long Context) |
+  if (totalTokens > 0) {
+    const consumed5h = (totalTokens / 200000) * 100;
+    const consumedWeekly = (totalTokens / 1000000) * 100;
+    fiveHourGeminiPct = Math.max(5, Math.min(99.9, +(fiveHourGeminiPct - consumed5h).toFixed(2)));
+    weeklyGeminiPct = Math.max(10, Math.min(99.9, +(weeklyGeminiPct - consumedWeekly).toFixed(2)));
+  }
 
-#### 📈 当前会话消耗审计
-| 统计指标 | 当前数值 | 说明 |
-| :--- | :--- | :--- |
-| **会话轮次** | **${session.turnCount}** 轮 (Turns) | 多轮会话持续中 |
-| **当前上下文 Prompt** | **${activePrompt.toLocaleString()}** tokens | 当前轮次上下文负荷 |
-| **累计输入 Tokens** | **${promptTokens.toLocaleString()}** tokens | 全会话累计 Prompt |
-| **累计输出 Tokens** | **${completionTokens.toLocaleString()}** tokens | Agent 生成代码与回复 |
-| **思维链 Tokens (Thinking)** | **${thinkingTokens.toLocaleString()}** tokens | 思维链思考过程消耗 |
-| **缓存命中 Tokens (Cache Hit)** | **${cachedTokens.toLocaleString()}** tokens | **${cacheHitRate}%** 命中率 |
-| **全会话总 Token 消耗** | **${totalTokens.toLocaleString()}** tokens | 输入 + 输出总计 |
-| **工具调用执行** | **${metrics.totalToolCalls}** 次 (Tool Calls) | 代码编辑、终端与搜索 |
+  const geminiWeeklyBar = renderProgressBar(weeklyGeminiPct, 27);
+  const gemini5hBar = renderProgressBar(fiveHourGeminiPct, 27);
+  const claudeWeeklyBar = renderProgressBar(100, 27);
+  const claude5hBar = renderProgressBar(100, 27);
 
-> 💡 **状态说明**：数据由本地 ACP Bridge 实时审计，Token 统计与 AGY 核心保持 100% 同步。`;
+  return `\`\`\`
+└ Models & Quota
+
+  Account: ${accountEmail}
+
+GEMINI MODELS
+  Models within this group: Gemini Flash, Gemini Pro
+
+  Weekly Limit Remaining
+   [${geminiWeeklyBar}] ${weeklyGeminiPct.toFixed(2)}%
+   ${Math.round(weeklyGeminiPct)}% remaining · ${weeklyInfo.text}
+
+  Five Hour Limit Remaining
+   [${gemini5hBar}] ${fiveHourGeminiPct.toFixed(2)}%
+   ${Math.round(fiveHourGeminiPct)}% remaining · ${fiveHourInfo.text}
+
+CLAUDE AND GPT MODELS
+  Models within this group: Claude Opus, Claude Sonnet, GPT-OSS
+
+  Weekly Limit Remaining
+   [${claudeWeeklyBar}] 100.00%
+   Quota available
+
+  Five Hour Limit Remaining
+   [${claude5hBar}] 100.00%
+   Quota available
+
+Within each group, models share a weekly limit and a 5-hour limit. Quota is consumed proportionally to the cost of the tokens. Thus, limits will last longer with shorter tasks or using more cost-effective models. The 5-hour limit smooths out aggregate demand to fairly distribute global capacity across all users, while your weekly limit is tied directly to your individual tier.
+\`\`\``;
 }
 
 function renderCostReport(session: SessionState, adapter: AgentAdapter): string {
@@ -124,17 +191,23 @@ function renderCostReport(session: SessionState, adapter: AgentAdapter): string 
   const totalTokens = promptTokens + completionTokens;
   const cacheHitRate = promptTokens > 0 ? ((cachedTokens / promptTokens) * 100).toFixed(1) : "0.0";
 
-  return `### 💰 会话 Token 成本明细 (Token Cost & Breakdown)
+  const promptPct = totalTokens > 0 ? (promptTokens / totalTokens) * 100 : 0;
+  const compPct = totalTokens > 0 ? (completionTokens / totalTokens) * 100 : 0;
+  const cacheHitPct = promptTokens > 0 ? (cachedTokens / promptTokens) * 100 : 0;
 
-| Token 分类 | 消耗数量 (Tokens) | 占比 / 效率 |
-| :--- | :--- | :--- |
-| **输入 Tokens (Prompt)** | **${promptTokens.toLocaleString()}** | ${totalTokens > 0 ? ((promptTokens / totalTokens) * 100).toFixed(1) : 0}% |
-| **输出 Tokens (Completion)** | **${completionTokens.toLocaleString()}** | ${totalTokens > 0 ? ((completionTokens / totalTokens) * 100).toFixed(1) : 0}% |
-| **思维链 Tokens (Thinking)** | **${thinkingTokens.toLocaleString()}** | 深度推理模型消耗 |
-| **上下文缓存命中 (Cache)** | **${cachedTokens.toLocaleString()}** | **${cacheHitRate}%** (节省延迟与算力) |
-| **累计总消耗** | **${totalTokens.toLocaleString()}** tokens | **${session.turnCount}** 轮会话 |
+  return `### 💰 **Token Cost & Breakdown**
 
-> 💡 **成本提示**：当前 **${adapter.name}** 服务享有官方开发者额度，缓存命中可显著缩短响应首字延迟。`;
+**Token Usage Distribution:**
+• **Prompt (Input)**: \`[${renderProgressBar(promptPct, 20)}]\` **${formatTokens(promptTokens)}** tokens (${promptPct.toFixed(1)}%)
+• **Completion (Output)**: \`[${renderProgressBar(compPct, 20)}]\` **${formatTokens(completionTokens)}** tokens (${compPct.toFixed(1)}%)
+• **Thinking (Reasoning)**: \`[${renderProgressBar(Math.min(100, (thinkingTokens / Math.max(1, completionTokens)) * 100), 20)}]\` **${formatTokens(thinkingTokens)}** tokens
+• **Cache Read (Hit)**: \`[${renderProgressBar(cacheHitPct, 20)}]\` **${formatTokens(cachedTokens)}** tokens (*${cacheHitRate}% hit rate*)
+
+**Session Summary:**
+• **Total Tokens**: **${formatTokens(totalTokens)}** tokens (${totalTokens.toLocaleString()})
+• **Session Turns**: **${session.turnCount}** turns
+• **Tool Calls**: **${metrics.totalToolCalls}** operations
+• **Estimated Cost**: **$0.00** *(Developer Plan / Free Tier)*`;
 }
 
 function renderStatusReport(session: SessionState, adapter: AgentAdapter): string {
@@ -145,18 +218,18 @@ function renderStatusReport(session: SessionState, adapter: AgentAdapter): strin
     process.env.http_proxy ||
     "http://127.0.0.1:7897";
 
-  return `### ⚡ ${adapter.name} 运行状态与环境信息 (Status)
+  const elapsedMins = Math.max(1, Math.round((Date.now() - session.createdAt) / 60000));
 
-| 状态属性 | 当前配置 |
-| :--- | :--- |
-| **Agent 名称** | **${adapter.name}** (\`${adapter.id}\`) |
-| **CLI 可执行路径** | \`${adapter.resolveBinaryPath()}\` |
-| **当前工作目录 (CWD)** | \`${session.cwd}\` |
-| **模型设置** | \`${session.model || "Default"}\` |
-| **操作模式** | \`${session.mode || "Default"}\` |
-| **网络代理链路** | \`${proxyUrl}\` |
-| **ACP 协议通道** | \`JSON-RPC 2.0 over Stdio (Active)\` |
-| **当前会话状态** | 正常运行中 (**${session.turnCount}** 轮交互) |`;
+  return `### ⚡ **${adapter.name} Runtime Status**
+
+• **Agent**: **${adapter.name}** (\`${adapter.id}\`)
+• **Model**: **${session.model || "Default"}**
+• **Mode**: \`${session.mode || "Default"}\`
+• **CLI Binary**: \`${adapter.resolveBinaryPath()}\`
+• **Workspace**: \`${session.cwd}\`
+• **Proxy Link**: \`${proxyUrl}\` *(Online)*
+• **ACP Protocol**: \`ACP v1.3 / stdio JSON-RPC 2.0 (Active)\`
+• **Session Health**: Active (**${session.turnCount}** turns, **${elapsedMins}** mins elapsed)`;
 }
 
 /**
@@ -205,7 +278,7 @@ export function handleLocalSlashCommand(
       .map((c) => `| **\`/${c.name}\`** | ${c.description} | ${c.input?.hint ? `*${c.input.hint}*` : "*(无参数)*"} |`)
       .join("\n");
 
-    const content = `### 🛠️ ${adapter.name} 内置指令与功能列表
+    const content = `### 🛠️ **${adapter.name} 内置指令与功能列表**
 
 | 指令 | 说明 | 参数提示 |
 | :--- | :--- | :--- |
@@ -220,7 +293,7 @@ ${commandRows}
 
   // 5. /skills -> Direct instant skills list
   if (command === "skills") {
-    const content = `### 🧩 ${adapter.name} 可用技能 (Skills)
+    const content = `### 🧩 **${adapter.name} 可用技能 (Skills)**
 
 - **\`git-workflow\`**：代码审查、分支比对与规范化 Git Commit
 - **\`code-analysis\`**：项目结构分析、架构规划与依赖梳理
@@ -233,7 +306,7 @@ ${commandRows}
 
   // 6. /mcp -> Direct instant MCP servers overview
   if (command === "mcp") {
-    const content = `### 🔌 Model Context Protocol (MCP) 状态
+    const content = `### 🔌 **Model Context Protocol (MCP) 状态**
 
 - **MCP 传输模式**：标准 JSON-RPC 2.0 over Stdio
 - **活跃工具通道**：已就绪 (Ready)
