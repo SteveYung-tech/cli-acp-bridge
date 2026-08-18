@@ -15,7 +15,7 @@ export function getAdapter(type?: string): AgentAdapter {
 
 export async function main(adapterType?: string) {
   const adapter = getAdapter(adapterType);
-  const agentApp = createAgentServer(adapter);
+  const agentServer = createAgentServer(adapter);
 
   // Create ACP newline-delimited JSON-RPC stream over stdio
   const input = Writable.toWeb(process.stdout) as unknown as WritableStream<Uint8Array>;
@@ -23,13 +23,18 @@ export async function main(adapterType?: string) {
   const stream = acp.ndJsonStream(input, output);
 
   // Connect agent to stdio stream
-  agentApp.connect(stream);
+  const connection = agentServer.connect(stream);
+  try {
+    await connection.closed;
+  } finally {
+    await agentServer.dispose();
+  }
 }
 
 // Auto-start when executed directly
 if (process.argv[1] && (process.argv[1].endsWith("index.js") || process.argv[1].endsWith("index.ts"))) {
   main().catch((err) => {
     console.error("Fatal error in ACP server:", err);
-    process.exit(1);
+    process.exitCode = 1;
   });
 }

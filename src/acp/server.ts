@@ -35,6 +35,10 @@ function extractPromptText(prompt: unknown): string {
 
 export function createAgentServer(adapter: AgentAdapter) {
   const sessionManager = new SessionManager();
+  const closingSessions = new Map<string, Promise<void>>();
+  let disposePromise: Promise<void> | undefined;
+  const ready = adapter.start();
+  void ready.catch(() => undefined);
 
   const agentApp = acp.agent({
     name: adapter.id + "-acp",
@@ -46,6 +50,10 @@ export function createAgentServer(adapter: AgentAdapter) {
       protocolVersion: acp.PROTOCOL_VERSION,
       agentCapabilities: {
         loadSession: false,
+        sessionCapabilities: {
+          close: {},
+          delete: {},
+        },
       },
     };
   });
@@ -59,6 +67,16 @@ export function createAgentServer(adapter: AgentAdapter) {
   agentApp.onRequest(acp.methods.agent.session.new, async (ctx) => {
     const params = ctx.params as { cwd?: string; [key: string]: unknown } | undefined;
     const session = sessionManager.createSession(params?.cwd);
+    const configOptions = adapter.getAvailableConfigOptions(session);
+    for (const option of configOptions) {
+      if (
+        (option.id === "model" || option.id === "mode" || option.id === "provider") &&
+        typeof option.currentValue === "string"
+      ) {
+        sessionManager.setSessionOption(session.id, option.id, option.currentValue);
+      }
+    }
+    adapter.createSession(session);
 
     // Notify CodeG of available slash commands for autocomplete
     const commands = adapter.getAvailableCommands(session);
@@ -80,15 +98,17 @@ export function createAgentServer(adapter: AgentAdapter) {
 
     return {
       sessionId: session.id,
-      configOptions: adapter.getAvailableConfigOptions(session),
+      configOptions,
     };
   });
 
   // 4. session/set_mode
   agentApp.onRequest(acp.methods.agent.session.setMode, async (ctx) => {
-    const params = ctx.params as { sessionId: string; mode?: string };
-    if (params?.sessionId && params.mode) {
-      sessionManager.setSessionOption(params.sessionId, "mode", params.mode);
+    const params = ctx.params as { sessionId: string; modeId?: string };
+    if (params?.sessionId && params.modeId) {
+      sessionManager.setSessionOption(params.sessionId, "mode", params.modeId);
+      const session = sessionManager.getSession(params.sessionId);
+      if (session) await adapter.updateSession(session);
     }
     return {};
   });
@@ -100,6 +120,7 @@ export function createAgentServer(adapter: AgentAdapter) {
       sessionManager.setSessionOption(params.sessionId, params.configId, String(params.value));
     }
     const session = sessionManager.getSession(params.sessionId);
+    if (session) await adapter.updateSession(session);
     return {
       configOptions: session ? adapter.getAvailableConfigOptions(session) : [],
     };
@@ -146,6 +167,7 @@ export function createAgentServer(adapter: AgentAdapter) {
 
     // 1. If previous turn is in-flight, abort it and wait for process cleanup
     if (session.activeAbortController) {
+      await adapter.cancelTurn(session.id);
       session.activeAbortController.abort();
       if (session.currentTurnPromise) {
         try {
@@ -163,6 +185,7 @@ export function createAgentServer(adapter: AgentAdapter) {
 
     const turnPromise = (async () => {
       try {
+        await ready;
         const result = await adapter.executeTurn({
           sessionId: session.id,
           cwd: session.cwd,
@@ -278,12 +301,69 @@ export function createAgentServer(adapter: AgentAdapter) {
   });
 
   // 7. session/cancel (Non-destructive clean interruption)
-  agentApp.onNotification(acp.methods.agent.session.cancel, (ctx) => {
+  agentApp.onNotification(acp.methods.agent.session.cancel, async (ctx) => {
     const params = ctx.params as { sessionId: string };
     if (params?.sessionId) {
+      await adapter.cancelTurn(params.sessionId);
       sessionManager.cancelSession(params.sessionId);
     }
   });
 
-  return agentApp;
+  const closeManagedSession = (sessionId: string): Promise<void> => {
+    const inProgress = closingSessions.get(sessionId);
+    if (inProgress) return inProgress;
+    const session = sessionManager.getSession(sessionId);
+    if (!session) return Promise.resolve();
+
+    const closing = (async () => {
+      let cancellationError: unknown;
+      try {
+        await adapter.cancelTurn(sessionId);
+      } catch (error) {
+        cancellationError = error;
+      }
+      sessionManager.cancelSession(sessionId);
+      if (session.currentTurnPromise) {
+        try {
+          await session.currentTurnPromise;
+        } catch {
+          // Closing a session owns the cleanup even when its turn failed.
+        }
+      }
+      try {
+        await adapter.closeSession(sessionId);
+      } finally {
+        sessionManager.deleteSession(sessionId);
+      }
+      if (cancellationError) throw cancellationError;
+    })();
+    closingSessions.set(sessionId, closing);
+    void closing.finally(() => closingSessions.delete(sessionId)).catch(() => undefined);
+    return closing;
+  };
+
+  agentApp.onRequest(acp.methods.agent.session.close, async (ctx) => {
+    await closeManagedSession(ctx.params.sessionId);
+    return {};
+  });
+
+  agentApp.onRequest(acp.methods.agent.session.delete, async (ctx) => {
+    await closeManagedSession(ctx.params.sessionId);
+    return {};
+  });
+
+  const dispose = (): Promise<void> => {
+    if (disposePromise) return disposePromise;
+    disposePromise = (async () => {
+      const results = await Promise.allSettled(
+        sessionManager.getSessions().map((session) => closeManagedSession(session.id)),
+      );
+      await adapter.dispose();
+      const failed = results.find((result) => result.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
+    })();
+    return disposePromise;
+  };
+
+  return Object.assign(agentApp, { ready, dispose });
 }

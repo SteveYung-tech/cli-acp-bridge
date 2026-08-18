@@ -65,6 +65,13 @@ export class SessionManager {
   }
 
   /**
+   * Snapshot all sessions so the server can release their backend resources.
+   */
+  public getSessions(): SessionState[] {
+    return [...this.sessions.values()];
+  }
+
+  /**
    * Update session option.
    */
   public setSessionOption(sessionId: string, key: string, value: string): boolean {
