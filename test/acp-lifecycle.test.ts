@@ -156,3 +156,57 @@ test("server disposal closes every remaining session before the adapter", async 
     await connection.closed;
   }
 });
+
+test("ACP tool updates preserve semantic kinds instead of rendering everything as execute", async () => {
+  const observed: Array<{ title: string; kind: string }> = [];
+  const adapter: AgentAdapter = {
+    id: "tool-kinds",
+    name: "Tool Kinds",
+    defaultBinaryName: "tool-kinds",
+    binaryEnvVar: "TOOL_KINDS_PATH",
+    async start() {},
+    createSession() {},
+    async updateSession() {},
+    async cancelTurn() {},
+    async closeSession() {},
+    async dispose() {},
+    resolveBinaryPath() { return "tool-kinds"; },
+    getAvailableConfigOptions() { return []; },
+    getAvailableCommands() { return []; },
+    async executeTurn(options) {
+      await options.onToolStart?.("search", "Tool", { Query: "needle", SearchPath: process.cwd() });
+      await options.onToolStart?.("read", "Tool", { AbsolutePath: "README.md" });
+      await options.onToolStart?.("edit", "Tool", { TargetFile: "README.md" });
+      await options.onToolStart?.("task", "Tool", { Action: "status", TaskId: "task-1" });
+      return { exitCode: 0, stdout: "", stderr: "", cancelled: false };
+    },
+  };
+  const server = createAgentServer(adapter);
+  const client = acp.client({ name: "tool-kind-test" })
+    .onNotification(acp.methods.client.session.update, (ctx) => {
+      if (ctx.params.update.sessionUpdate === "tool_call") {
+        observed.push({ title: ctx.params.update.title, kind: ctx.params.update.kind });
+      }
+    });
+  const connection = client.connect(server);
+  try {
+    const session = await connection.agent.request(acp.methods.agent.session.new, {
+      cwd: process.cwd(),
+      mcpServers: [],
+    });
+    await connection.agent.request(acp.methods.agent.session.prompt, {
+      sessionId: session.sessionId,
+      prompt: [{ type: "text", text: "inspect" }],
+    });
+    assert.deepEqual(observed, [
+      { title: "Search", kind: "search" },
+      { title: "Read", kind: "read" },
+      { title: "Edit", kind: "edit" },
+      { title: "Task", kind: "other" },
+    ]);
+  } finally {
+    connection.close();
+    await connection.closed;
+    await server.dispose();
+  }
+});

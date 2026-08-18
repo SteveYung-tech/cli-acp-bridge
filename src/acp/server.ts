@@ -34,6 +34,38 @@ function extractPromptText(prompt: unknown): string {
   return String(prompt || "");
 }
 
+function toolInputKeys(input: unknown): string[] {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return [];
+  return Object.keys(input).map((key) => key.toLowerCase());
+}
+
+function toolPresentation(toolName: string, input: unknown): { title: string; kind: acp.ToolKind } {
+  const normalizedName = toolName.trim().toLowerCase();
+  const keys = toolInputKeys(input);
+  const hasKey = (...names: string[]) => names.some((name) => keys.includes(name.toLowerCase()));
+
+  if (hasKey("TargetFile", "Patch", "Edits") || /edit|write|create|patch|replace/.test(normalizedName)) {
+    return { title: normalizedName === "tool" ? "Edit" : toolName, kind: "edit" };
+  }
+  if (/delete|remove/.test(normalizedName)) return { title: toolName, kind: "delete" };
+  if (/move|rename/.test(normalizedName)) return { title: toolName, kind: "move" };
+  if (hasKey("Query", "SearchPath", "Pattern") || /search|find|grep/.test(normalizedName)) {
+    return { title: normalizedName === "tool" ? "Search" : toolName, kind: "search" };
+  }
+  if (hasKey("AbsolutePath", "FilePath") || /read|view|list|glob/.test(normalizedName)) {
+    return { title: normalizedName === "tool" ? "Read" : toolName, kind: "read" };
+  }
+  if (/fetch|web|url/.test(normalizedName)) return { title: toolName, kind: "fetch" };
+  if (/think|reason/.test(normalizedName)) return { title: toolName, kind: "think" };
+  if (hasKey("CommandLine", "Command") || /bash|shell|terminal|execute|command/.test(normalizedName)) {
+    return { title: normalizedName === "tool" ? "Shell" : toolName, kind: "execute" };
+  }
+  if (hasKey("Action", "TaskId") || /task|agent/.test(normalizedName)) {
+    return { title: normalizedName === "tool" ? "Task" : toolName, kind: "other" };
+  }
+  return { title: normalizedName === "tool" ? "Tool" : toolName, kind: "other" };
+}
+
 export function createAgentServer(adapter: AgentAdapter) {
   const sessionManager = new SessionManager();
   const closingSessions = new Map<string, Promise<void>>();
@@ -240,13 +272,14 @@ export function createAgentServer(adapter: AgentAdapter) {
           },
           onToolStart: async (toolCallId, toolName, toolInput) => {
             try {
+              const presentation = toolPresentation(toolName, toolInput);
               await ctx.client.notify(acp.methods.client.session.update, {
                 sessionId: session.id,
                 update: {
                   sessionUpdate: "tool_call",
                   toolCallId,
-                  title: `Execute: ${toolName}`,
-                  kind: "execute",
+                  title: presentation.title,
+                  kind: presentation.kind,
                   status: "in_progress",
                   rawInput: toolInput,
                 },
