@@ -53,45 +53,49 @@ function writeJson(res, statusCode, payload) {
   res.end(JSON.stringify(payload));
 }
 
-function sse(res, name, payload) {
-  res.write(`event: ${name}\n`);
+function sse(res, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
 
 function streamChatFrames(res) {
-  sse(res, "runtime_info", {
+  sse(res, {
+    type: "runtime_info",
     runtime: "atomcode",
     version: "0.0.0-fake",
+  });
+  sse(res, {
+    type: "session_assigned",
     session_id: "fake-session",
   });
-  sse(res, "session_assigned", {
-    session_id: "fake-session",
-    conversation_id: "fake-conversation",
-  });
-  sse(res, "text", { text_delta: "hello" });
-  sse(res, "reasoning", { text_delta: "thinking" });
-  sse(res, "tool_start", {
+  sse(res, { type: "text", content: "hello" });
+  sse(res, { type: "reasoning", content: "thinking" });
+  sse(res, {
+    type: "tool_start",
     id: "tool-1",
     name: "fake_tool",
-    input: {},
+    arguments: {},
   });
-  sse(res, "tool_result", {
+  sse(res, {
+    type: "tool_result",
     id: "tool-1",
     name: "fake_tool",
     output: "fake output",
-    is_error: false,
+    success: true,
+    duration_ms: 1,
   });
-  sse(res, "text", { text_delta: " world" });
-  sse(res, "tokens", {
-    input_tokens: 3,
-    output_tokens: 2,
-    thinking_tokens: 1,
-    cache_read_tokens: 0,
+  sse(res, { type: "text", content: " world" });
+  sse(res, {
+    type: "tokens",
+    prompt: 3,
+    completion: 2,
+    total: 5,
   });
-  sse(res, "done", {
-    status: "SUCCESS",
-    response: "hello world",
-    conversation_id: "fake-conversation",
+  sse(res, {
+    type: "done",
+    session_id: "fake-session",
+    stop_reason: "end_turn",
+    tokens: 5,
+    tool_calls: 1,
   });
 }
 
@@ -119,7 +123,13 @@ function main() {
     }
 
     if (method === "POST" && url === "/sessions") {
-      writeJson(res, 200, { session_id: "fake-session", conversation_id: "fake-conversation" });
+      writeJson(res, 201, {
+        id: "fake-session",
+        name: "fake-session",
+        working_dir: "fixture",
+        project_hash: "fake-project",
+        created_at: "2026-08-18T00:00:00.000Z",
+      });
       return;
     }
 
