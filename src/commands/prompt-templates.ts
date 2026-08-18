@@ -23,18 +23,6 @@ export function expandSlashCommand(rawPrompt: string): string {
 4. 执行 \`git commit -m "<Commit Message>"\` 完成提交。
 5. 最终输出 Commit Hash 以及简要的提交总结。`;
 
-    case "cost":
-    case "usage":
-    case "status":
-      return `【会话用量与状态统计 (Usage & Cost)】
-请统计并展示当前会话的详细资源消耗与运行状态：
-- 当前激活的模型与运行模式
-- 输入 Token (Prompt Tokens) 及 缓存命中 Tokens (Cached Tokens)
-- 输出 Token (Completion / Output Tokens)
-- 思维链推理 Token (Reasoning / Thinking Tokens)
-- 当前会话已执行的轮次 (Turns) 与工具调用统计 (Tool Calls)
-请以结构清晰的表格形式呈现。`;
-
     case "review":
       return `【代码质量与安全审查 (Code Review)】
 请对当前工作区的所有未提交变更进行深度的代码审查：

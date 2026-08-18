@@ -6,6 +6,7 @@ export interface SessionMetrics {
   totalThinkingTokens: number;
   totalCachedTokens: number;
   totalToolCalls: number;
+  lastPromptTokens: number;
 }
 
 export interface SessionState {
@@ -43,6 +44,7 @@ export class SessionManager {
         totalThinkingTokens: 0,
         totalCachedTokens: 0,
         totalToolCalls: 0,
+        lastPromptTokens: 0,
       },
       configOptions: {},
       activeAbortController: null,
@@ -99,7 +101,10 @@ export class SessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
-    if (delta.inputTokens) session.metrics.totalInputTokens += delta.inputTokens;
+    if (delta.inputTokens) {
+      session.metrics.totalInputTokens += delta.inputTokens;
+      session.metrics.lastPromptTokens = delta.inputTokens;
+    }
     if (delta.outputTokens) session.metrics.totalOutputTokens += delta.outputTokens;
     if (delta.thinkingTokens) session.metrics.totalThinkingTokens += delta.thinkingTokens;
     if (delta.cachedTokens) session.metrics.totalCachedTokens += delta.cachedTokens;

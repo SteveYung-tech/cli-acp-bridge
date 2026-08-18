@@ -3,6 +3,7 @@ import type { AgentAdapter } from "../adapters/base.js";
 import { SessionManager } from "../session/manager.js";
 import { expandSlashCommand } from "../commands/prompt-templates.js";
 import { handleLocalSlashCommand } from "../commands/local-handlers.js";
+import { sanitizeText } from "../stream/parser.js";
 
 /**
  * Extracts plain text from an ACP prompt parameter.
@@ -174,6 +175,8 @@ export function createAgentServer(adapter: AgentAdapter) {
             sessionManager.addMetrics(session.id, delta);
           },
           onThought: async (thought) => {
+            const cleanThought = sanitizeText(thought);
+            if (!cleanThought) return;
             try {
               await ctx.client.notify(acp.methods.client.session.update, {
                 sessionId: session.id,
@@ -181,7 +184,7 @@ export function createAgentServer(adapter: AgentAdapter) {
                   sessionUpdate: "agent_thought_chunk",
                   content: {
                     type: "text",
-                    text: thought,
+                    text: cleanThought,
                   },
                 },
               });
@@ -190,6 +193,8 @@ export function createAgentServer(adapter: AgentAdapter) {
             }
           },
           onChunk: async (chunk) => {
+            const cleanChunk = sanitizeText(chunk);
+            if (!cleanChunk) return;
             try {
               await ctx.client.notify(acp.methods.client.session.update, {
                 sessionId: session.id,
@@ -197,7 +202,7 @@ export function createAgentServer(adapter: AgentAdapter) {
                   sessionUpdate: "agent_message_chunk",
                   content: {
                     type: "text",
-                    text: chunk,
+                    text: cleanChunk,
                   },
                 },
               });

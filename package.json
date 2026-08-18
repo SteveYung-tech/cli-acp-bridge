@@ -14,7 +14,8 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "tsx test/test-client.ts",
-    "test:agy": "tsx test/test-agy.ts"
+    "test:agy": "tsx test/test-agy.ts",
+    "test:parser": "tsx test/test-parser.ts"
   },
   "keywords": [
     "acp",

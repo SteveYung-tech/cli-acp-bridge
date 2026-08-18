@@ -18,20 +18,31 @@ export interface ParsedEvent {
   };
 }
 
-// Regex matching standard ANSI sequences, CSI, OSC, and cursor codes
+// Complete Regex matching standard ANSI sequences, CSI, OSC, DCS, APC, PM, and cursor codes
 // eslint-disable-next-line no-control-regex
-const ANSI_REGEX = /(?:\x1B[@-Z\\-_]|[\x80-\x9A\x9C-\x9F]|(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~])/g;
+const ANSI_REGEX = /(?:\x1B\[[0-9:;<=>?]*[ -/]*[@-~]|\x1B\][^\x07\x1B]*(?:\x07|\x1B\\|\n|$)|\x1B[P_^\\][^\x1B]*(?:\x1B\\|\n|$)|\x1B[@-Z\\-_]|[\x80-\x9A\x9C-\x9F])/g;
 
-// Control characters (excluding \t, \n, \r)
+// Non-printable control characters (excluding \n and \t) + zero-width BOM (\uFEFF) + replacement char (\uFFFD)
 // eslint-disable-next-line no-control-regex
-const CONTROL_CHAR_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\x1B]/g;
+const CONTROL_CHAR_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F\uFEFF\uFFFD]/g;
 
-export function cleanTerminalOutput(text: string): string {
+/**
+ * Robust terminal text sanitizer:
+ * 1. Normalizes CRLF (\r\n) and isolated CR (\r) to standard LF (\n), preventing square box glyphs in web UIs.
+ * 2. Strips all ANSI escape sequences, OSC/DCS codes, and terminal formatting.
+ * 3. Removes unprintable control characters and BOM while preserving UTF-8 / Chinese characters.
+ */
+export function sanitizeText(text: string): string {
   if (!text) return "";
-  return text.replace(ANSI_REGEX, "").replace(CONTROL_CHAR_REGEX, "");
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(ANSI_REGEX, "")
+    .replace(CONTROL_CHAR_REGEX, "");
 }
 
-export const stripAnsi = cleanTerminalOutput;
+export const cleanTerminalOutput = sanitizeText;
+export const stripAnsi = sanitizeText;
 
 /**
  * State machine parser delivering zero-latency token streaming while
@@ -157,7 +168,8 @@ export class AtomCodeStreamParser {
         this.buffer = this.buffer.slice(bracketIdx);
       }
 
-      // Check if bracket starts a known system/diagnostic tag
+      // Check if bracket starts or could start a known system/diagnostic tag
+      const knownTagPrefixes = ["[thinking", "[tool→", "[tool←", "[tool", "[tokens", "[done", "[dev", "[headless"];
       const isSystemTag =
         this.buffer.startsWith("[tool→") ||
         this.buffer.startsWith("[tool←") ||
@@ -168,6 +180,15 @@ export class AtomCodeStreamParser {
         this.buffer.startsWith("[thinking]");
 
       if (!isSystemTag) {
+        // If it's a short string starting with '[' that could be a partial system tag header (e.g. "[think"), wait for next chunk
+        const isPotentialTag =
+          this.buffer.length < 12 &&
+          knownTagPrefixes.some((p) => p.startsWith(this.buffer));
+
+        if (isPotentialTag) {
+          break;
+        }
+
         // Ordinary text with bracket (e.g. Markdown link "[label]" or array "[item]")
         // Look for next bracket or newline to emit safely
         const nextBracket = this.buffer.indexOf("[", 1);

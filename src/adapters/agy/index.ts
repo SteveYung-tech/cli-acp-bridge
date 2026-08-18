@@ -5,6 +5,7 @@ import { StringDecoder } from "node:string_decoder";
 import * as acp from "@agentclientprotocol/sdk";
 import type { AgentAdapter, ExecuteTurnOptions, TurnResult } from "../base.js";
 import type { SessionState } from "../../session/manager.js";
+import { sanitizeText } from "../../stream/parser.js";
 
 export class AgyAdapter implements AgentAdapter {
   public readonly id = "agy";
@@ -190,6 +191,13 @@ export class AgyAdapter implements AgentAdapter {
       let lineBuffer = "";
       let streamedAnyText = false;
       let agyErrorMessage: string | null = null;
+      let turnToolCalls = 0;
+      let turnMetrics = {
+        inputTokens: 0,
+        outputTokens: 0,
+        thinkingTokens: 0,
+        cachedTokens: 0,
+      };
 
       const child: ChildProcess = spawn(binaryPath, args, {
         cwd: options.cwd || process.cwd(),
@@ -202,6 +210,13 @@ export class AgyAdapter implements AgentAdapter {
           https_proxy: proxyUrl,
           all_proxy: proxyUrl,
           CI: "true",
+          PYTHONIOENCODING: "utf-8",
+          PYTHONUTF8: "1",
+          LANG: "zh_CN.UTF-8",
+          LC_ALL: "zh_CN.UTF-8",
+          NO_COLOR: "1",
+          FORCE_COLOR: "0",
+          TERM: "dumb",
         },
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
@@ -253,24 +268,26 @@ export class AgyAdapter implements AgentAdapter {
           if (data.event === "step_update" && data.step_update) {
             const update = data.step_update;
 
-            if (update.usage && options.onMetrics) {
-              await options.onMetrics({
-                inputTokens: update.usage.input_tokens || 0,
-                outputTokens: update.usage.output_tokens || 0,
-                thinkingTokens: update.usage.thinking_tokens || 0,
-                cachedTokens: update.usage.cache_read_tokens || 0,
-              });
+            if (update.usage) {
+              turnMetrics.inputTokens = update.usage.input_tokens || turnMetrics.inputTokens;
+              turnMetrics.outputTokens = update.usage.output_tokens || turnMetrics.outputTokens;
+              turnMetrics.thinkingTokens = update.usage.thinking_tokens || turnMetrics.thinkingTokens;
+              turnMetrics.cachedTokens = update.usage.cache_read_tokens || turnMetrics.cachedTokens;
             }
 
             if (update.step_type === "agent_response" && update.text_delta && options.onChunk) {
-              streamedAnyText = true;
-              await options.onChunk(update.text_delta);
-            } else if (update.step_type === "thought" && update.text_delta && options.onThought) {
-              await options.onThought(update.text_delta);
-            } else if (update.step_type === "tool_call" && options.onToolStart) {
-              if (options.onMetrics) {
-                await options.onMetrics({ toolCalls: 1 });
+              const cleaned = sanitizeText(update.text_delta);
+              if (cleaned) {
+                streamedAnyText = true;
+                await options.onChunk(cleaned);
               }
+            } else if (update.step_type === "thought" && update.text_delta && options.onThought) {
+              const cleaned = sanitizeText(update.text_delta);
+              if (cleaned) {
+                await options.onThought(cleaned);
+              }
+            } else if (update.step_type === "tool_call" && options.onToolStart) {
+              turnToolCalls++;
               const toolCallId = `call_${update.step_index || Date.now()}`;
               await options.onToolStart(toolCallId, update.tool_name || "Tool", update.input || {});
             } else if (update.step_type === "tool_result" && options.onToolEnd) {
@@ -278,25 +295,29 @@ export class AgyAdapter implements AgentAdapter {
               await options.onToolEnd(toolCallId, update.output || "ok");
             }
           } else if (data.event === "result" && data.result) {
-            if (data.result.usage && options.onMetrics) {
-              await options.onMetrics({
-                inputTokens: data.result.usage.input_tokens || 0,
-                outputTokens: data.result.usage.output_tokens || 0,
-                thinkingTokens: data.result.usage.thinking_tokens || 0,
-                cachedTokens: data.result.usage.cache_read_tokens || 0,
-              });
+            if (data.result.usage) {
+              turnMetrics.inputTokens = data.result.usage.input_tokens || turnMetrics.inputTokens;
+              turnMetrics.outputTokens = data.result.usage.output_tokens || turnMetrics.outputTokens;
+              turnMetrics.thinkingTokens = data.result.usage.thinking_tokens || turnMetrics.thinkingTokens;
+              turnMetrics.cachedTokens = data.result.usage.cache_read_tokens || turnMetrics.cachedTokens;
             }
             if (data.result.status === "ERROR") {
               agyErrorMessage = data.result.error || "AGY returned an error";
             } else if (!streamedAnyText && data.result.response && options.onChunk) {
-              await options.onChunk(data.result.response);
-              streamedAnyText = true;
+              const cleaned = sanitizeText(data.result.response);
+              if (cleaned) {
+                await options.onChunk(cleaned);
+                streamedAnyText = true;
+              }
             }
           }
         } catch {
           // Non-JSON line fallback
           if (options.onChunk && !trimmed.startsWith("Fetching") && !trimmed.startsWith("Checking")) {
-            await options.onChunk(line + "\n");
+            const cleaned = sanitizeText(line);
+            if (cleaned) {
+              await options.onChunk(cleaned + "\n");
+            }
           }
         }
       };
@@ -346,6 +367,16 @@ export class AgyAdapter implements AgentAdapter {
         if (lineBuffer.trim().length > 0) {
           await processJsonLine(lineBuffer);
           lineBuffer = "";
+        }
+
+        if (options.onMetrics) {
+          await options.onMetrics({
+            inputTokens: turnMetrics.inputTokens,
+            outputTokens: turnMetrics.outputTokens,
+            thinkingTokens: turnMetrics.thinkingTokens,
+            cachedTokens: turnMetrics.cachedTokens,
+            toolCalls: turnToolCalls,
+          });
         }
 
         if (code !== 0 && !isCancelled) {

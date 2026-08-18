@@ -161,12 +161,26 @@ export class AtomCodeAdapter implements AgentAdapter {
       let stdoutData = "";
       let stderrData = "";
       let isCancelled = false;
+      let turnToolCalls = 0;
+      let turnMetrics = {
+        inputTokens: 0,
+        outputTokens: 0,
+        thinkingTokens: 0,
+        cachedTokens: 0,
+      };
 
       const child: ChildProcess = spawn(binaryPath, args, {
         cwd: options.cwd || process.cwd(),
         env: {
           ...process.env,
           CI: "true",
+          PYTHONIOENCODING: "utf-8",
+          PYTHONUTF8: "1",
+          LANG: "zh_CN.UTF-8",
+          LC_ALL: "zh_CN.UTF-8",
+          NO_COLOR: "1",
+          FORCE_COLOR: "0",
+          TERM: "dumb",
         },
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
@@ -211,14 +225,15 @@ export class AtomCodeAdapter implements AgentAdapter {
         if (event.type === "thought" && event.content && options.onThought) {
           await options.onThought(event.content);
         } else if (event.type === "tool_call_start" && event.toolCallId && options.onToolStart) {
-          if (options.onMetrics) {
-            await options.onMetrics({ toolCalls: 1 });
-          }
+          turnToolCalls++;
           await options.onToolStart(event.toolCallId, event.toolName || "Tool", event.toolInput);
         } else if (event.type === "tool_call_end" && event.toolCallId && options.onToolEnd) {
           await options.onToolEnd(event.toolCallId, event.toolResult || "ok");
-        } else if (event.type === "tokens" && event.metrics && options.onMetrics) {
-          await options.onMetrics(event.metrics);
+        } else if (event.type === "tokens" && event.metrics) {
+          turnMetrics.inputTokens = event.metrics.inputTokens || turnMetrics.inputTokens;
+          turnMetrics.outputTokens = event.metrics.outputTokens || turnMetrics.outputTokens;
+          turnMetrics.cachedTokens = event.metrics.cachedTokens || turnMetrics.cachedTokens;
+          turnMetrics.thinkingTokens = event.metrics.thinkingTokens || turnMetrics.thinkingTokens;
         } else if (event.type === "text" && event.content && options.onChunk) {
           await options.onChunk(event.content);
         }
@@ -269,6 +284,16 @@ export class AtomCodeAdapter implements AgentAdapter {
         const remaining = streamParser.flush();
         for (const ev of remaining) {
           await handleEvent(ev);
+        }
+
+        if (options.onMetrics) {
+          await options.onMetrics({
+            inputTokens: turnMetrics.inputTokens,
+            outputTokens: turnMetrics.outputTokens,
+            thinkingTokens: turnMetrics.thinkingTokens,
+            cachedTokens: turnMetrics.cachedTokens,
+            toolCalls: turnToolCalls,
+          });
         }
 
         resolve({
