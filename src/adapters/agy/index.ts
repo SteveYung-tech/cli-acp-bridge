@@ -13,6 +13,18 @@ export class AgyAdapter implements AgentAdapter {
   public readonly defaultBinaryName = "agy";
   public readonly binaryEnvVar = "AGY_PATH";
 
+  public async start(): Promise<void> {}
+
+  public createSession(_session: SessionState): void {}
+
+  public async updateSession(_session: SessionState): Promise<void> {}
+
+  public async cancelTurn(_sessionId: string): Promise<void> {}
+
+  public async closeSession(_sessionId: string): Promise<void> {}
+
+  public async dispose(): Promise<void> {}
+
   public resolveBinaryPath(): string {
     if (process.env[this.binaryEnvVar] && fs.existsSync(process.env[this.binaryEnvVar]!)) {
       return process.env[this.binaryEnvVar]!;

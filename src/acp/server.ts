@@ -164,6 +164,7 @@ export function createAgentServer(adapter: AgentAdapter) {
     const turnPromise = (async () => {
       try {
         const result = await adapter.executeTurn({
+          sessionId: session.id,
           cwd: session.cwd,
           prompt: expandSlashCommand(promptText),
           continueSession,

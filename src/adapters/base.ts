@@ -2,6 +2,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import type { SessionState } from "../session/manager.js";
 
 export interface ExecuteTurnOptions {
+  sessionId: string;
   cwd?: string;
   prompt: string;
   continueSession?: boolean;
@@ -35,6 +36,12 @@ export interface AgentAdapter {
   readonly name: string;
   readonly defaultBinaryName: string;
   readonly binaryEnvVar: string;
+  start(): Promise<void>;
+  createSession(session: SessionState): void;
+  updateSession(session: SessionState): Promise<void>;
+  cancelTurn(sessionId: string): Promise<void>;
+  closeSession(sessionId: string): Promise<void>;
+  dispose(): Promise<void>;
   resolveBinaryPath(): string;
   getAvailableConfigOptions(session: SessionState): acp.SessionConfigOption[];
   getAvailableCommands(session: SessionState): acp.AvailableCommand[];
