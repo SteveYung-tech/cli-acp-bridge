@@ -63,9 +63,9 @@ atomcode-acp
 ### 1. 复制或克隆工程
 将工程放置在用户目录，例如：
 ```bash
-git clone <your-repo-url> ~/atomcode-acp
-# 或直接复制到 ~/atomcode-acp
-cd ~/atomcode-acp
+git clone git@github.com:SteveYung-tech/cli-acp-bridge.git ~/cli-acp-bridge
+# 或直接复制到 ~/cli-acp-bridge
+cd ~/cli-acp-bridge
 ```
 
 ### 2. 编译并全局软链命令
@@ -104,11 +104,11 @@ cur = conn.cursor()
 
 # 注册 AtomCode
 cur.execute('''INSERT OR REPLACE INTO custom_agent (id, registry_id, name, description, version, distribution_kind, spec_json, icon_url, created_at, updated_at, skills_shared_store, source, version_probe, supports_mcp) 
-VALUES (2, 'atomcode', 'Atom', 'AtomCode AI via ACP', '1.0.0', 'npx', '{\"npx\":{\"package\":\"atomcode-acp\",\"args\":[],\"env\":{},\"cmd\":\"atomcode-acp\"}}', NULL, datetime('now'), datetime('now'), 1, 'manual', 'atomcode --version', 1)''')
+VALUES (2, 'atomcode', 'Atom', 'AtomCode AI via ACP', '1.0.0', 'npx', '{\"npx\":{\"package\":\"cli-acp-bridge\",\"args\":[],\"env\":{},\"cmd\":\"atomcode-acp\"}}', NULL, datetime('now'), datetime('now'), 1, 'manual', 'atomcode --version', 1)''')
 
 # 注册 Antigravity (agy) - 绑定 7897 代理端口
 cur.execute('''INSERT OR REPLACE INTO custom_agent (id, registry_id, name, description, version, distribution_kind, spec_json, icon_url, created_at, updated_at, skills_shared_store, source, version_probe, supports_mcp) 
-VALUES (3, 'antigravity', 'Antigravity', 'Antigravity AI via ACP', '1.0.0', 'npx', '{\"npx\":{\"package\":\"atomcode-acp\",\"args\":[],\"env\":{\"HTTP_PROXY\":\"http://127.0.0.1:7897\",\"HTTPS_PROXY\":\"http://127.0.0.1:7897\"},\"cmd\":\"agy-acp\"}}', NULL, datetime('now'), datetime('now'), 1, 'manual', 'agy --version', 1)''')
+VALUES (3, 'antigravity', 'Antigravity', 'Antigravity AI via ACP', '1.0.0', 'npx', '{\"npx\":{\"package\":\"cli-acp-bridge\",\"args\":[],\"env\":{\"HTTP_PROXY\":\"http://127.0.0.1:7897\",\"HTTPS_PROXY\":\"http://127.0.0.1:7897\"},\"cmd\":\"agy-acp\"}}', NULL, datetime('now'), datetime('now'), 1, 'manual', 'agy --version', 1)''')
 
 conn.commit()
 print('✅ CachyOS CodeG Agent 注册完成！')
@@ -132,7 +132,7 @@ HTTP_PROXY=http://127.0.0.1:7897 HTTPS_PROXY=http://127.0.0.1:7897 npm run test:
 ### 1. 编译并全局软链命令
 在 PowerShell 中运行：
 ```powershell
-cd E:\atomcode-acp
+cd E:\cli-acp-bridge
 npm install
 npm run build
 npm link
@@ -141,7 +141,7 @@ npm link
 ### 2. 一键注册到 Windows 的 CodeG
 在 PowerShell 中运行：
 ```powershell
-python -c "import sqlite3; conn = sqlite3.connect(r'C:\Users\Admin\AppData\Roaming\app.codeg\codeg.db'); cur = conn.cursor(); cur.execute('''INSERT OR REPLACE INTO custom_agent (id, registry_id, name, description, version, distribution_kind, spec_json, icon_url, created_at, updated_at, skills_shared_store, source, version_probe, supports_mcp) VALUES (2, 'atomcode', 'Atom', 'AtomCode AI via ACP', '1.0.0', 'npx', '{\x22npx\x22:{\x22package\x22:\x22atomcode-acp\x22,\x22args\x22:[],\x22env\x22:{\x22ATOMCODE_PATH\x22:\x22C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\AtomCode\\\\atomcode.exe\x22},\x22cmd\x22:\x22atomcode-acp\x22}}', 'E:/atomcode-acp/assets/atomcode.jpg', datetime('now'), datetime('now'), 1, 'manual', 'atomcode --version', 1)'''); cur.execute('''INSERT OR REPLACE INTO custom_agent (id, registry_id, name, description, version, distribution_kind, spec_json, icon_url, created_at, updated_at, skills_shared_store, source, version_probe, supports_mcp) VALUES (3, 'antigravity', 'Antigravity', 'Antigravity AI via ACP', '1.0.0', 'npx', '{\x22npx\x22:{\x22package\x22:\x22atomcode-acp\x22,\x22args\x22:[],\x22env\x22:{\x22AGY_PATH\x22:\x22C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\agy\\\\bin\\\\agy.exe\x22,\x22HTTP_PROXY\x22:\x22http://127.0.0.1:7897\x22,\x22HTTPS_PROXY\x22:\x22http://127.0.0.1:7897\x22},\x22cmd\x22:\x22agy-acp\x22}}', 'E:/atomcode-acp/assets/antigravity.jpg', datetime('now'), datetime('now'), 1, 'manual', 'agy --version', 1)'''); conn.commit(); print('Windows CodeG Agent 注册成功!')"
+python -c "import sqlite3; conn = sqlite3.connect(r'C:\Users\Admin\AppData\Roaming\app.codeg\codeg.db'); cur = conn.cursor(); cur.execute('''INSERT OR REPLACE INTO custom_agent (id, registry_id, name, description, version, distribution_kind, spec_json, icon_url, created_at, updated_at, skills_shared_store, source, version_probe, supports_mcp) VALUES (2, 'atomcode', 'Atom', 'AtomCode AI via ACP', '1.0.0', 'npx', '{\x22npx\x22:{\x22package\x22:\x22cli-acp-bridge\x22,\x22args\x22:[],\x22env\x22:{\x22ATOMCODE_PATH\x22:\x22C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\AtomCode\\\\atomcode.exe\x22},\x22cmd\x22:\x22atomcode-acp\x22}}', 'assets/atomcode.jpg', datetime('now'), datetime('now'), 1, 'manual', 'atomcode --version', 1)'''); cur.execute('''INSERT OR REPLACE INTO custom_agent (id, registry_id, name, description, version, distribution_kind, spec_json, icon_url, created_at, updated_at, skills_shared_store, source, version_probe, supports_mcp) VALUES (3, 'antigravity', 'Antigravity', 'Antigravity AI via ACP', '1.0.0', 'npx', '{\x22npx\x22:{\x22package\x22:\x22cli-acp-bridge\x22,\x22args\x22:[],\x22env\x22:{\x22AGY_PATH\x22:\x22C:\\\\Users\\\\Admin\\\\AppData\\\\Local\\\\agy\\\\bin\\\\agy.exe\x22,\x22HTTP_PROXY\x22:\x22http://127.0.0.1:7897\x22,\x22HTTPS_PROXY\x22:\x22http://127.0.0.1:7897\x22},\x22cmd\x22:\x22agy-acp\x22}}', 'assets/antigravity.jpg', datetime('now'), datetime('now'), 1, 'manual', 'agy --version', 1)'''); conn.commit(); print('Windows CodeG Agent 注册成功!')"
 ```
 
 ### 3. 运行端到端验证
@@ -158,8 +158,8 @@ $env:HTTP_PROXY="http://127.0.0.1:7897"; $env:HTTPS_PROXY="http://127.0.0.1:7897
 
 ## 🎨 资源图标 (Assets)
 
-* AtomCode 图标：[`assets/atomcode.jpg`](file:///E:/atomcode-acp/assets/atomcode.jpg)
-* Antigravity 图标：[`assets/antigravity.jpg`](file:///E:/atomcode-acp/assets/antigravity.jpg)
+* AtomCode 图标：[`assets/atomcode.jpg`](assets/atomcode.jpg)
+* Antigravity 图标：[`assets/antigravity.jpg`](assets/antigravity.jpg)
 
 ---
 

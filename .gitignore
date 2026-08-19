@@ -20,3 +20,6 @@ Thumbs.db
 # Temporary test / task artifacts
 scratch/
 .system_generated/
+
+# Local diagnostics
+assets/调用报错.txt

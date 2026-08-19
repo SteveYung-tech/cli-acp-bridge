@@ -4,8 +4,8 @@
   "version": "1.0.0",
   "description": "AtomCode AI Coding Assistant via ACP with full multi-turn, tool execution, and thinking support",
   "author": "AtomCode Team",
-  "command": "node",
-  "args": ["E:/atomcode-acp/dist/index.js"],
+  "command": "atomcode-acp",
+  "args": [],
   "transport": "stdio",
   "capabilities": {
     "streaming": true,

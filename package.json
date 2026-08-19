@@ -1,7 +1,7 @@
 {
-  "name": "atomcode-acp",
+  "name": "cli-acp-bridge",
   "version": "1.0.0",
-  "description": "ACP (Agent Client Protocol) adapter bridge for AtomCode CLI and Antigravity (agy)",
+  "description": "ACP (Agent Client Protocol) adapter bridge for CLI coding agents (AtomCode, Antigravity, and more)",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
