@@ -210,3 +210,50 @@ test("ACP tool updates preserve semantic kinds instead of rendering everything a
     await server.dispose();
   }
 });
+
+test("ACP converts backend turn failures into an agent message and TurnComplete", async () => {
+  const messages: string[] = [];
+  const adapter: AgentAdapter = {
+    id: "failing",
+    name: "Failing Backend",
+    defaultBinaryName: "failing",
+    binaryEnvVar: "FAILING_PATH",
+    async start() {},
+    createSession() {},
+    async updateSession() {},
+    async cancelTurn() {},
+    async closeSession() {},
+    async dispose() {},
+    resolveBinaryPath() { return "failing"; },
+    getAvailableConfigOptions() { return []; },
+    getAvailableCommands() { return []; },
+    async executeTurn() {
+      throw new Error("provider rate limited\u001b[31m");
+    },
+  };
+  const server = createAgentServer(adapter);
+  const client = acp.client({ name: "failure-test" })
+    .onNotification(acp.methods.client.session.update, (ctx) => {
+      const update = ctx.params.update;
+      if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+        messages.push(update.content.text);
+      }
+    });
+  const connection = client.connect(server);
+  try {
+    const session = await connection.agent.request(acp.methods.agent.session.new, {
+      cwd: process.cwd(),
+      mcpServers: [],
+    });
+    const result = await connection.agent.request(acp.methods.agent.session.prompt, {
+      sessionId: session.sessionId,
+      prompt: [{ type: "text", text: "work" }],
+    });
+    assert.equal(result.stopReason, "end_turn");
+    assert.deepEqual(messages, ["Failing Backend failed: provider rate limited"]);
+  } finally {
+    connection.close();
+    await connection.closed;
+    await server.dispose();
+  }
+});

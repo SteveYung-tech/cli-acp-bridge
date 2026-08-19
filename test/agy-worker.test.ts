@@ -69,8 +69,8 @@ test("one AGY worker handles two turns without restarting", async () => {
 
     const records = (await readFile(logPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     assert.deepEqual(records.filter((record) => record.event === "prompt").map((record) => record.message), [
-      { type: "user", message: { role: "user", content: [{ type: "text", text: "one" }] } },
-      { type: "user", message: { role: "user", content: [{ type: "text", text: "two" }] } },
+      { event: "user", message: { role: "user", content: [{ type: "text", text: "one" }] } },
+      { event: "user", message: { role: "user", content: [{ type: "text", text: "two" }] } },
     ]);
   } finally {
     await worker.dispose();
@@ -93,7 +93,7 @@ test("AGY launch arguments use the required order", async () => {
     await worker.start();
     assert.deepEqual(JSON.parse(await readFile(argsPath, "utf8")), [
       "-p", "", "--input-format", "stream-json", "--output-format", "stream-json",
-      "--dangerously-skip-permissions", "--conversation", "existing-conversation",
+      "--dangerously-skip-permissions", "--print-timeout", "24h", "--conversation", "existing-conversation",
       "--model", "test-model", "--mode", "test-mode", "--add-dir", directory,
     ]);
     assert.equal(worker.conversationId, "from-init");

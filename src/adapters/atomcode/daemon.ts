@@ -1,6 +1,9 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { createServer } from "node:net";
 import { once } from "node:events";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { spawnCommand, terminateProcess, type ProcessCommand } from "../../runtime/process-command.js";
 import { TimingTrace } from "../../runtime/timing.js";
 import { SseParser } from "./sse.js";
@@ -9,6 +12,7 @@ export interface AtomCodeDaemonOptions {
   command: ProcessCommand;
   env?: NodeJS.ProcessEnv;
   startupTimeoutMs?: number;
+  registryDirectory?: string;
 }
 
 export interface AtomCodeSession {
@@ -53,6 +57,8 @@ export class AtomCodeDaemon {
   private startPromise?: Promise<void>;
   private disposePromise?: Promise<void>;
   private baseUrl?: string;
+  private daemonPort?: number;
+  private authToken?: string;
   private retainedStderr = "";
   private fatalError?: Error;
   private ready = false;
@@ -86,7 +92,7 @@ export class AtomCodeDaemon {
     onAccepted?: () => void | Promise<void>,
   ): Promise<void> {
     await this.ensureReady();
-    const response = await fetch(`${this.baseUrl}/chat`, {
+    const response = await this.fetchAuthenticated("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
       body: JSON.stringify(request),
@@ -132,7 +138,7 @@ export class AtomCodeDaemon {
       if (this.startPromise) await this.startPromise.catch(() => undefined);
       if (this.baseUrl && this.child?.exitCode === null && this.child.signalCode === null) {
         try {
-          await fetch(`${this.baseUrl}/shutdown`, {
+          await this.fetchAuthenticated("/shutdown", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: "{}",
@@ -152,7 +158,9 @@ export class AtomCodeDaemon {
     const port = await reserveLoopbackPort();
     if (this.disposed) throw new Error("AtomCode daemon was disposed during startup");
     this.baseUrl = `http://127.0.0.1:${port}`;
+    this.daemonPort = port;
     const args = [
+      "--dev",
       "daemon",
       "--port", String(port),
       "--client", "atomcode-acp",
@@ -183,6 +191,7 @@ export class AtomCodeDaemon {
           signal: AbortSignal.any([AbortSignal.timeout(200), this.lifetimeController.signal]),
         });
         if (response.ok) {
+          await this.refreshAuthToken();
           this.ready = true;
           this.trace.mark("daemon_ready");
           return;
@@ -224,7 +233,7 @@ export class AtomCodeDaemon {
 
   private async postJson<T = unknown>(path: string, body: unknown, accepted = [200]): Promise<T> {
     await this.ensureReady();
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await this.fetchAuthenticated(path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -236,6 +245,52 @@ export class AtomCodeDaemon {
   private async responseError(label: string, response: Response): Promise<Error> {
     const detail = (await response.text()).slice(0, 2_048);
     return new Error(`${label} failed with HTTP ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
+
+  private async fetchAuthenticated(path: string, init: RequestInit): Promise<Response> {
+    if (!this.baseUrl) throw new Error("AtomCode daemon URL is unavailable");
+    let response = await fetch(`${this.baseUrl}${path}`, {
+      ...init,
+      headers: this.authenticatedHeaders(init.headers),
+    });
+    if (response.status !== 401) return response;
+
+    await this.refreshAuthToken();
+    if (!this.authToken) return response;
+    await response.body?.cancel().catch(() => undefined);
+    response = await fetch(`${this.baseUrl}${path}`, {
+      ...init,
+      headers: this.authenticatedHeaders(init.headers),
+    });
+    return response;
+  }
+
+  private authenticatedHeaders(source?: HeadersInit): Headers {
+    const headers = new Headers(source);
+    if (this.authToken) headers.set("Authorization", `Bearer ${this.authToken}`);
+    return headers;
+  }
+
+  private async refreshAuthToken(): Promise<void> {
+    if (!this.daemonPort) return;
+    const env = this.options.env ?? process.env;
+    const directory = this.options.registryDirectory
+      ?? env.ATOMCODE_HOME
+      ?? join(env.USERPROFILE ?? env.HOME ?? homedir(), ".atomcode");
+    try {
+      const registry = JSON.parse(
+        await readFile(join(directory, `daemon-${this.daemonPort}.json`), "utf8"),
+      ) as { port?: unknown; token?: unknown };
+      if (
+        (registry.port === undefined || registry.port === this.daemonPort) &&
+        typeof registry.token === "string" &&
+        registry.token.length > 0
+      ) {
+        this.authToken = registry.token;
+      }
+    } catch {
+      // Older daemons and deterministic test fixtures may not require authentication.
+    }
   }
 
   private recordFatal(error: Error): Error {

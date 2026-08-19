@@ -107,6 +107,7 @@ export class AgyWorker {
       "--input-format", "stream-json",
       "--output-format", "stream-json",
       "--dangerously-skip-permissions",
+      "--print-timeout", "24h",
     ];
     if (this.options.conversationId) args.push("--conversation", this.options.conversationId);
     if (this.options.model) args.push("--model", this.options.model);
@@ -182,7 +183,7 @@ export class AgyWorker {
     }
 
     const input = {
-      type: "user",
+      event: "user",
       message: {
         role: "user",
         content: [{ type: "text", text: prompt }],

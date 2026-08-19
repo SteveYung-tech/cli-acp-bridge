@@ -14,10 +14,13 @@
 // When FAKE_BACKEND_LOG is set, appends one JSON record per request so tests
 // can assert on daemon lifecycle and traffic without a real backend.
 
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
+import { join } from "node:path";
 
 const logPath = process.env.FAKE_BACKEND_LOG;
+const daemonToken = process.env.FAKE_DAEMON_TOKEN;
+const registryDirectory = process.env.FAKE_DAEMON_REGISTRY_DIR;
 
 function log(record) {
   if (!logPath) return;
@@ -26,16 +29,17 @@ function log(record) {
 
 function parseArgs(argv) {
   const args = argv.slice(2);
-  const subcommand = args[0];
+  const subcommandIndex = args.indexOf("daemon");
+  const subcommand = subcommandIndex >= 0 ? args[subcommandIndex] : args[0];
   let port = 13456;
-  for (let i = 1; i < args.length; i++) {
+  for (let i = Math.max(subcommandIndex + 1, 1); i < args.length; i++) {
     if (args[i] === "--port") {
       port = Number(args[++i]);
     } else if (args[i].startsWith("--port=")) {
       port = Number(args[i].slice("--port=".length));
     }
   }
-  return { subcommand, port };
+  return { args, subcommand, port };
 }
 
 function readBody(req) {
@@ -76,6 +80,11 @@ function streamChatFrames(res, request) {
       res.end();
       return;
     }
+    if (request.message === "empty-done") {
+      sse(res, { type: "done", session_id: sessionId, stop_reason: "rate_limited" });
+      res.end();
+      return;
+    }
     sse(res, { type: "text", content: "hello" });
     sse(res, { type: "reasoning", content: "thinking" });
     sse(res, { type: "tool_start", id: "tool-1", name: "fake_tool", arguments: "{}" });
@@ -101,10 +110,18 @@ function streamChatFrames(res, request) {
 }
 
 function main() {
-  const { subcommand, port } = parseArgs(process.argv);
+  const { args, subcommand, port } = parseArgs(process.argv);
   if (subcommand !== "daemon") {
     process.stderr.write(`fake-atomcode: expected 'daemon' subcommand, got '${subcommand}'\n`);
     process.exit(2);
+  }
+
+  if (daemonToken && registryDirectory) {
+    mkdirSync(registryDirectory, { recursive: true });
+    writeFileSync(
+      join(registryDirectory, `daemon-${port}.json`),
+      JSON.stringify({ pid: process.pid, port, token: daemonToken }),
+    );
   }
 
   let sessionCounter = 0;
@@ -121,6 +138,11 @@ function main() {
 
     if (method === "GET" && url === "/health") {
       writeJson(res, 200, { status: "ok" });
+      return;
+    }
+
+    if (daemonToken && req.headers.authorization !== `Bearer ${daemonToken}`) {
+      writeJson(res, 401, { error: "unauthorized" });
       return;
     }
 
@@ -163,7 +185,7 @@ function main() {
   });
 
   server.listen(port, "127.0.0.1", () => {
-    log({ event: "startup", backend: "atomcode", port });
+    log({ event: "startup", backend: "atomcode", port, args });
     process.stdout.write(`fake-atomcode daemon listening on 127.0.0.1:${port}\n`);
   });
 }

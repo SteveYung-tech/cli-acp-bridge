@@ -119,6 +119,25 @@ test("AtomCode maps text, reasoning, tools, tokens, and provider without batchin
   }
 });
 
+test("AtomCode leaves provider selection to daemon config by default", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "atomcode-default-provider-"));
+  const logPath = join(directory, "backend.log");
+  const adapter = createFixtureAdapter(logPath);
+  const state = session("acp-default");
+  try {
+    const modelOption = adapter.getAvailableConfigOptions(state).find((option) => option.id === "model");
+    assert.equal(modelOption?.currentValue, "default");
+    state.model = String(modelOption?.currentValue);
+    adapter.createSession(state);
+    await adapter.executeTurn(turn(state.id, "one", { model: state.model }));
+    const chat = (await readRequests(logPath, "/chat"))[0];
+    assert.equal("provider" in JSON.parse(chat.body), false);
+  } finally {
+    await adapter.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("AtomCode cancellation uses request id before assignment and native session id afterward", async () => {
   const directory = await mkdtemp(join(tmpdir(), "atomcode-cancel-"));
   const logPath = join(directory, "backend.log");
@@ -160,6 +179,22 @@ test("AtomCode rejects error events and treats stopped as cancellation", async (
     adapter.createSession(state);
     await assert.rejects(adapter.executeTurn(turn(state.id, "error")), /fake chat error/);
     assert.equal((await adapter.executeTurn(turn(state.id, "stopped"))).cancelled, true);
+  } finally {
+    await adapter.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("AtomCode rejects a terminal event that has no assistant output", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "atomcode-empty-terminal-"));
+  const adapter = createFixtureAdapter(join(directory, "backend.log"));
+  const state = session("acp-one");
+  try {
+    adapter.createSession(state);
+    await assert.rejects(
+      adapter.executeTurn(turn(state.id, "empty-done")),
+      /without assistant output.*rate_limited/i,
+    );
   } finally {
     await adapter.dispose();
     await rm(directory, { recursive: true, force: true });

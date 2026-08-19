@@ -39,7 +39,7 @@
 2. **原生折叠思考流（Thinking Bubble）**：深度提取思维链并实时封装为 `agent_thought_chunk`。
 3. **打断插话与排队发送（Prompt Queue & Interruption）**：在生成过程中发送新指令并点击 Stop 时，优雅打断并自动无缝发送排队消息，与 Codex 原生体验一致。
 4. **模型与模式热切换**：
-   * **AtomCode**：`deepseek-v4-flash`（默认）、`deepseek-v4`、`codingplan-deepseek`、`qwen-2.5-coder-32b`；支持 `code` / `architect` / `ask` 模式。
+   * **AtomCode**：默认跟随 `~/.atomcode/config.toml` 的 `default_provider`，也可选择已配置的 AtomGit provider；支持 `code` / `architect` / `ask` 模式。
 5. **斜杠指令系统（Slash Commands）**：输入 `/` 即可唤出 Agent 内置快捷指令菜单：
    * **AtomCode**：`/plan`（任务规划）、`/review`（代码审查）、`/test`（生成测试）、`/init`（项目初始化）、`/compact`（历史压缩）、`/help`（帮助说明）。
    * **Antigravity (agy)**：`/plan`（分步规划）、`/grill-me`（深度需求对齐）、`/learn`（沉淀知识/规则）、`/research`（启动调研子代理）、`/review`（Diff 审查）、`/compact`（上下文压缩）、`/help`（指南）。

@@ -324,7 +324,27 @@ export function createAgentServer(adapter: AgentAdapter) {
             stopReason: "cancelled" as const,
           };
         }
-        throw err;
+        const detail = sanitizeText(err instanceof Error ? err.message : String(err)).trim();
+        const message = `${adapter.name} failed: ${detail || "unknown backend error"}`;
+        try {
+          await ctx.client.notify(acp.methods.client.session.update, {
+            sessionId: session.id,
+            update: {
+              sessionUpdate: "agent_message_chunk",
+              content: {
+                type: "text",
+                text: message,
+              },
+            },
+          });
+        } catch (notifyError) {
+          console.error("Failed to send backend error message:", notifyError);
+        }
+        session.turnCount++;
+        session.updatedAt = Date.now();
+        return {
+          stopReason: "end_turn" as const,
+        };
       } finally {
         if (session.activeAbortController === abortController) {
           session.activeAbortController = null;

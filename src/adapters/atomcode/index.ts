@@ -13,7 +13,7 @@ import {
   type AtomCodeSession,
 } from "./daemon.js";
 
-const DEFAULT_ATOMCODE_MODEL = "deepseek-v4-flash";
+const DEFAULT_ATOMCODE_MODEL = "default";
 const DEFAULT_ATOMCODE_MODE = "code";
 
 export interface AtomCodeAdapterOptions {
@@ -160,10 +160,9 @@ export class AtomCodeAdapter implements AgentAdapter {
         type: "select",
         currentValue: session.model || DEFAULT_ATOMCODE_MODEL,
         options: [
-          { value: "deepseek-v4-flash", name: "DeepSeek V4 Flash (Default)" },
-          { value: "deepseek-v4", name: "DeepSeek V4" },
-          { value: "codingplan-deepseek", name: "CodingPlan DeepSeek" },
-          { value: "qwen-2.5-coder-32b", name: "Qwen 2.5 Coder 32B" },
+          { value: "default", name: "AtomCode Configured Default" },
+          { value: "AtomGit-deepseek-v4-flash", name: "AtomGit DeepSeek V4 Flash" },
+          { value: "AtomGit-Qwen-Qwen3-VL-8B-Instruct", name: "AtomGit Qwen3 VL 8B" },
         ],
       },
       {
@@ -270,6 +269,7 @@ export class AtomCodeAdapter implements AgentAdapter {
     runtime.cancelRequested = false;
     runtime.cancelPromise = undefined;
     let terminal: "done" | "stopped" | undefined;
+    let terminalDetail: string | undefined;
     let textOutput = "";
     let toolCalls = 0;
     let sawEvent = false;
@@ -284,7 +284,7 @@ export class AtomCodeAdapter implements AgentAdapter {
         working_dir: options.cwd ?? runtime.cwd,
         session_id: native.id,
         request_id: requestId,
-        provider: options.model ?? options.provider ?? DEFAULT_ATOMCODE_MODEL,
+        provider: this.selectedProvider(options),
       }, async (event) => {
         if (!sawEvent) {
           sawEvent = true;
@@ -305,6 +305,10 @@ export class AtomCodeAdapter implements AgentAdapter {
         }
         if (event.type === "done") {
           terminal = "done";
+          const detail = event.stop_reason ?? event.reason ?? event.message ?? event.error;
+          if (detail !== undefined && detail !== null) {
+            terminalDetail = this.eventString(detail, "");
+          }
           if (!runtime.cancelRequested && options.onMetrics) {
             await options.onMetrics({
               toolCalls: typeof event.tool_calls === "number" ? event.tool_calls : toolCalls,
@@ -327,6 +331,10 @@ export class AtomCodeAdapter implements AgentAdapter {
         return { exitCode: null, stdout: textOutput, stderr: "", cancelled: true };
       }
       if (terminal !== "done") throw new Error("AtomCode chat stream ended without a terminal event");
+      if (!textOutput.trim()) {
+        const detail = terminalDetail ? ` (${terminalDetail})` : "";
+        throw new Error(`AtomCode ended without assistant output${detail}`);
+      }
       return { exitCode: null, stdout: textOutput, stderr: "", cancelled: false };
     } catch (error) {
       if (runtime.cancelRequested || options.signal?.aborted) {
@@ -380,6 +388,11 @@ export class AtomCodeAdapter implements AgentAdapter {
     } catch {
       return value;
     }
+  }
+
+  private selectedProvider(options: ExecuteTurnOptions): string | undefined {
+    const selected = options.model ?? options.provider;
+    return selected && selected !== DEFAULT_ATOMCODE_MODEL ? selected : undefined;
   }
 
   private eventString(value: unknown, fallback: string): string {
