@@ -40,10 +40,13 @@ export class AgyAdapter implements AgentAdapter {
     if (this.disposed) throw new Error("AGY adapter is disposed");
   }
 
-  public createSession(session: SessionState): void {
+  public createSession(session: SessionState): Promise<void> {
     if (this.disposed) throw new Error("AGY adapter is disposed");
-    if (this.runtimes.has(session.id)) return;
-    this.runtimes.set(session.id, this.createRuntime(session));
+    const current = this.runtimes.get(session.id);
+    if (current) return current.preparation;
+    const runtime = this.createRuntime(session);
+    this.runtimes.set(session.id, runtime);
+    return runtime.preparation;
   }
 
   public async updateSession(session: SessionState): Promise<void> {

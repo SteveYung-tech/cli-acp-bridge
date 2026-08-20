@@ -5,6 +5,8 @@ import { sanitizeText } from "../../stream/parser.js";
 import { spawnCommand, terminateProcess, type ProcessCommand } from "../../runtime/process-command.js";
 import { TimingTrace } from "../../runtime/timing.js";
 
+const DEFAULT_AGY_STARTUP_TIMEOUT_MS = 30_000;
+
 export interface AgyWorkerOptions {
   command: ProcessCommand;
   cwd: string;
@@ -47,6 +49,13 @@ interface ActiveTurn {
 
 function errorMessage(value: unknown, fallback: string): string {
   return typeof value === "string" && value.length > 0 ? value : fallback;
+}
+
+function environmentStartupTimeout(env: NodeJS.ProcessEnv): number {
+  const raw = env.AGY_STARTUP_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_AGY_STARTUP_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : DEFAULT_AGY_STARTUP_TIMEOUT_MS;
 }
 
 export class AgyWorker {
@@ -133,7 +142,8 @@ export class AgyWorker {
       return this.startPromise;
     }
 
-    const timeoutMs = this.options.startupTimeoutMs ?? 10_000;
+    const timeoutMs = this.options.startupTimeoutMs
+      ?? environmentStartupTimeout(this.options.env ?? process.env);
     this.startupTimer = setTimeout(() => {
       const diagnostics = this.retainedStderr ? `: ${this.retainedStderr}` : "";
       this.fail(new Error(`AGY startup timed out after ${timeoutMs}ms${diagnostics}`));

@@ -39,7 +39,7 @@ export interface AgentAdapter {
   readonly defaultBinaryName: string;
   readonly binaryEnvVar: string;
   start(): Promise<void>;
-  createSession(session: SessionState): void;
+  createSession(session: SessionState): void | Promise<void>;
   updateSession(session: SessionState): Promise<void>;
   cancelTurn(sessionId: string): Promise<void>;
   closeSession(sessionId: string): Promise<void>;

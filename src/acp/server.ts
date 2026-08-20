@@ -34,6 +34,15 @@ function extractPromptText(prompt: unknown): string {
   return String(prompt || "");
 }
 
+function initializationError(adapter: AgentAdapter, value: unknown): acp.RequestError {
+  const detail = sanitizeText(value instanceof Error ? value.message : String(value)).trim();
+  return new acp.RequestError(
+    -32000,
+    `${adapter.name} failed to initialize: ${detail || "unknown backend error"}`,
+    { phase: "session_initialization" },
+  );
+}
+
 function toolInputKeys(input: unknown): string[] {
   if (!input || typeof input !== "object" || Array.isArray(input)) return [];
   return Object.keys(input).map((key) => key.toLowerCase());
@@ -99,6 +108,12 @@ export function createAgentServer(adapter: AgentAdapter) {
   // 3. session/new
   agentApp.onRequest(acp.methods.agent.session.new, async (ctx) => {
     const params = ctx.params as { cwd?: string; [key: string]: unknown } | undefined;
+    try {
+      await ready;
+    } catch (error) {
+      throw initializationError(adapter, error);
+    }
+
     const session = sessionManager.createSession(params?.cwd);
     const configOptions = adapter.getAvailableConfigOptions(session);
     for (const option of configOptions) {
@@ -109,7 +124,18 @@ export function createAgentServer(adapter: AgentAdapter) {
         sessionManager.setSessionOption(session.id, option.id, option.currentValue);
       }
     }
-    adapter.createSession(session);
+    try {
+      await adapter.createSession(session);
+    } catch (error) {
+      try {
+        await adapter.closeSession(session.id);
+      } catch (cleanupError) {
+        console.error("Failed to clean up uninitialized session:", cleanupError);
+      } finally {
+        sessionManager.deleteSession(session.id);
+      }
+      throw initializationError(adapter, error);
+    }
 
     // Notify CodeG of available slash commands for autocomplete
     const commands = adapter.getAvailableCommands(session);

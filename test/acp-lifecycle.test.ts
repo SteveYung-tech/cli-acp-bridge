@@ -13,6 +13,99 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function sessionReadinessAdapter(
+  createSession: AgentAdapter["createSession"],
+  overrides: Partial<AgentAdapter> = {},
+): AgentAdapter {
+  return {
+    id: "session-readiness",
+    name: "Session Readiness",
+    defaultBinaryName: "session-readiness",
+    binaryEnvVar: "SESSION_READINESS_PATH",
+    async start() {},
+    createSession,
+    async updateSession() {},
+    async cancelTurn() {},
+    async closeSession() {},
+    async dispose() {},
+    resolveBinaryPath() { return "session-readiness"; },
+    getAvailableConfigOptions() { return []; },
+    getAvailableCommands() { return []; },
+    async executeTurn() { return { exitCode: 0, stdout: "", stderr: "", cancelled: false }; },
+    ...overrides,
+  };
+}
+
+test("ACP session/new stays pending until backend session preparation succeeds", async () => {
+  const preparation = deferred<void>();
+  const adapter = sessionReadinessAdapter(() => preparation.promise);
+  const server = createAgentServer(adapter);
+  const connection = acp.client({ name: "session-readiness-test" }).connect(server);
+  let settled = false;
+
+  try {
+    const request = connection.agent.request(acp.methods.agent.session.new, {
+      cwd: process.cwd(),
+      mcpServers: [],
+    }).then((response) => {
+      settled = true;
+      return response;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(settled, false, "session/new must represent backend readiness");
+
+    preparation.resolve();
+    const response = await request;
+    assert.ok(response.sessionId);
+    assert.equal(settled, true);
+  } finally {
+    connection.close();
+    await connection.closed;
+    await server.dispose();
+  }
+});
+
+test("ACP session/new rolls back a backend session that fails preparation", async () => {
+  let createdSessionId: string | undefined;
+  const closedSessionIds: string[] = [];
+  let commandUpdates = 0;
+  const adapter = sessionReadinessAdapter(
+    (session) => {
+      createdSessionId = session.id;
+      return Promise.reject(new Error("login unavailable"));
+    },
+    {
+      async closeSession(sessionId) { closedSessionIds.push(sessionId); },
+      getAvailableCommands() {
+        return [{ name: "help", description: "Help", input: null }];
+      },
+    },
+  );
+  const server = createAgentServer(adapter);
+  const client = acp.client({ name: "session-readiness-failure-test" })
+    .onNotification(acp.methods.client.session.update, () => { commandUpdates++; });
+  const connection = client.connect(server);
+
+  try {
+    await assert.rejects(
+      connection.agent.request(acp.methods.agent.session.new, {
+        cwd: process.cwd(),
+        mcpServers: [],
+      }),
+      /Session Readiness failed to initialize: login unavailable/,
+    );
+    assert.ok(createdSessionId);
+    assert.deepEqual(closedSessionIds, [createdSessionId]);
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    assert.equal(commandUpdates, 0, "failed sessions must not publish commands");
+  } finally {
+    connection.close();
+    await connection.closed;
+    await server.dispose();
+  }
+});
+
 test("ACP server owns adapter readiness, session defaults, cancellation, and cleanup", async () => {
   const calls: string[] = [];
   const startGate = deferred<void>();
@@ -77,7 +170,14 @@ test("ACP server owns adapter readiness, session defaults, cancellation, and cle
     });
     assert.deepEqual(initialized.agentCapabilities.sessionCapabilities, { close: {}, delete: {} });
 
-    const response = await connection.agent.request(acp.methods.agent.session.new, { cwd: process.cwd(), mcpServers: [] });
+    const pendingSession = connection.agent.request(acp.methods.agent.session.new, {
+      cwd: process.cwd(),
+      mcpServers: [],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(createdSession, undefined, "session preparation must wait for adapter startup");
+    startGate.resolve();
+    const response = await pendingSession;
     const sessionId = response.sessionId;
     assert.equal(createdSession?.model, "model-default");
     assert.equal(createdSession?.mode, "mode-default");
@@ -94,10 +194,6 @@ test("ACP server owns adapter readiness, session defaults, cancellation, and cle
       sessionId,
       prompt: [{ type: "text", text: "hello" }],
     });
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(executed, false, "prompt must wait until the adapter is ready");
-
-    startGate.resolve();
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(executed, true);
 

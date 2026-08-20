@@ -56,6 +56,17 @@ atomcode-acp
 
 `npm test` 只使用仓库内的确定性假后端，不访问模型服务，也不消耗额度。`npm run test:live:atomcode` 和 `npm run test:live:agy` 才会使用本机已配置的真实后端与供应商访问权限。
 
+### Antigravity 冷启动超时
+
+ACP 会在 `session/new` 阶段等待 AGY 发出 `init`，只有后端真正就绪后才向客户端返回会话。默认等待 30 秒；网络认证或大型工程初始化较慢时，可以通过 `AGY_STARTUP_TIMEOUT_MS` 调整：
+
+```powershell
+$env:AGY_STARTUP_TIMEOUT_MS="60000"
+agy-acp
+```
+
+超时或认证失败会直接终止会话创建并清理对应的 AGY worker，不会留下可以继续输入但实际已经失效的会话。
+
 ---
 
 ## 🐧 Linux / CachyOS (Arch Linux) 部署指南

@@ -124,6 +124,18 @@ test("AGY start times out and includes retained stderr diagnostics", async () =>
   await settlesWithin(worker.dispose());
 });
 
+test("AGY startup timeout can be configured through the process environment", async () => {
+  const worker = createScriptedWorker(`process.stdin.resume()`, {
+    startupTimeoutMs: undefined,
+    env: { ...process.env, AGY_STARTUP_TIMEOUT_MS: "25" },
+  });
+  try {
+    await assert.rejects(settlesWithin(worker.start(), 500), /timed out after 25ms/i);
+  } finally {
+    await settlesWithin(worker.dispose());
+  }
+});
+
 test("AGY rejects malformed NDJSON instead of leaving a turn pending", async () => {
   const source = `console.log(JSON.stringify({event:"init",conversation_id:"c"})); process.stdin.once("data",()=>console.log("not-json"))`;
   const worker = createScriptedWorker(source);

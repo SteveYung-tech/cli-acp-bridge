@@ -67,9 +67,10 @@ export class AtomCodeAdapter implements AgentAdapter {
     return this.startPromise;
   }
 
-  public createSession(session: SessionState): void {
+  public createSession(session: SessionState): Promise<void> {
     if (this.disposed) throw new Error("AtomCode adapter is disposed");
-    if (this.runtimes.has(session.id)) return;
+    const current = this.runtimes.get(session.id);
+    if (current) return current.preparation.then(() => undefined);
     const runtime: AtomCodeSessionRuntime = {
       cwd: session.cwd,
       cancelRequested: false,
@@ -85,6 +86,7 @@ export class AtomCodeAdapter implements AgentAdapter {
       });
     void runtime.preparation.catch(() => undefined);
     this.runtimes.set(session.id, runtime);
+    return runtime.preparation.then(() => undefined);
   }
 
   public async updateSession(session: SessionState): Promise<void> {
